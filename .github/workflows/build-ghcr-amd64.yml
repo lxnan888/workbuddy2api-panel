@@ -1,0 +1,28 @@
+name: Build amd64 image to GHCR
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - v*
+permissions:
+  contents: read
+  packages: write
+jobs:
+  build-amd64:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository }}
+      CR_PAT: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push amd64 image
+        run: |
+          set -euo pipefail
+          image="${IMAGE_NAME,,}"
+          tag="sha-${GITHUB_SHA::12}"
+          printf '%s' "$CR_PAT" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          DOCKER_BUILDKIT=0 docker build --platform linux/amd64 --pull -t "${image}:latest" -t "${image}:${tag}" .
+          docker push "${image}:latest"
+          docker push "${image}:${tag}"
+          printf 'published_image=%s\n' "${image}:latest"
+          printf 'published_sha_tag=%s\n' "${image}:${tag}"
