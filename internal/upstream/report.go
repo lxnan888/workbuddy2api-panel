@@ -10,6 +10,7 @@ package upstream
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -38,6 +39,26 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 	}
 	c.BillingHeaders(req, a)
 	return c.doJSON(req)
+}
+
+// billingMeterJSON 仅对 /billing/meter 族端点（get-user-resource / daily-checkin）
+// 按 realm 走双路径 fallback：global 先无 /v2 前缀，ErrNotFound 时二次换有 /v2 前缀
+// （上游新旧路径分叉）；cn 单路径（有 /v2）现状不变。仅 global realm 才有多路径。
+func (c *Client) billingMeterJSON(a *auth.Auth, paths []string, method string, body any) (json.RawMessage, error) {
+	var lastErr error
+	for i, path := range paths {
+		data, err := c.billingJSON(a, method, path, body)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+		// 仅 404 换路径（路径不存在才值得 fallback）；其他错误直接返回。
+		var ue *Error
+		if !errors.As(err, &ue) || ue.Kind != ErrNotFound || i == len(paths)-1 {
+			return nil, err
+		}
+	}
+	return nil, lastErr
 }
 
 // chatRequestEvent 客户端 chat_request_send 事件完整形状（与 probe_active.py chat_event 对齐）。
@@ -83,14 +104,18 @@ type chatRequestEvent struct {
 
 // ReportChatActivity 向上游发送一条对话活跃上报（chat_request_send）。
 // conversationID 由调用方生成（如 wb2api-<ms>），无需真实会话——服务端不校验一致性。
+// requestID 为本轮请求独立标识（多轮同会话上报时各条不同）；空时回落 conversationID。
 // 错误语义与 doJSON 一致：HTTP 非 2xx / 业务 code != 0 → *Error。
-func (c *Client) ReportChatActivity(a *auth.Auth, conversationID string) error {
-	return c.ReportChatActivityModel(a, conversationID, "deepseek-v4-flash", "DeepSeek V4 Flash")
+func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID string) error {
+	return c.ReportChatActivityModel(a, conversationID, requestID, "deepseek-v4-flash", "DeepSeek V4 Flash")
 }
 
 // ReportChatActivityModel 同上，但可指定上报携带的模型：供「体验某模型」类任务
-// 对齐实际模型（如 Model_chat_GLM5.2 需 requestModelId=glm-5.2）。
-func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, modelID, modelName string) error {
+// 对齐实际模型（如 Model_chat_GLM5.2 需 requestModelId=glm-5.2 与独立 requestID）。
+func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID, modelID, modelName string) error {
+	if requestID == "" {
+		requestID = conversationID
+	}
 	if modelID == "" {
 		modelID = "deepseek-v4-flash"
 	}
@@ -104,7 +129,7 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, modelID, 
 		ReportDelay:           0,
 		Mode:                  "craft",
 		ConversationID:        conversationID,
-		RequestID:             conversationID,
+		RequestID:             requestID,
 		InputLength:           12,
 		RequestModelID:        modelID,
 		RequestModelName:      modelName,
@@ -130,7 +155,7 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, modelID, 
 		FileURI:               "",
 		PresentAt:             now,
 		TraceID:               "",
-		RootRequestID:         conversationID,
+		RootRequestID:         requestID,
 		ParentConversationID:  conversationID,
 		AgentName:             "default",
 		AgentType:             "conversation",

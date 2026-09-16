@@ -64,8 +64,21 @@ type Config struct {
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭
-		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"`  // 缺省 5；<=0 回落 5
+		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
 	} `json:"schedule"`
+
+	Global struct {
+		// Enabled global realm 路由开关。缺省 true：Realm() 正常把 realm=global/
+		// domain=workbuddy.ai 的账号判为 global 并路由 global base/路径。
+		// 显式 "enabled": false 关闭（逃生门，纯 CN 锁定：即便 auth 写了 realm=global
+		// 也不路由，auth.Realm() 双保险的第一道闸）。纯 CN 部署行为不变：CN 账号
+		// 恒判 cn，global base 只在 realm=global 的账号上被使用。
+		Enabled bool `json:"enabled"`
+		// ChatBase / BillingBase 国际版上游 base 覆盖；空 = 回落内置默认
+		// https://www.workbuddy.ai（internal/upstream.defaultGlobalBase）。
+		ChatBase    string `json:"chat_base"`
+		BillingBase string `json:"billing_base"`
+	} `json:"global"`
 
 	Upstream struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
@@ -74,12 +87,25 @@ type Config struct {
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流中空闲上限（活跃吐数据续命不掐）；<=0 回落默认 300。
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
-		// UserAgent 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。
+		// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认三段式）。
 		// 全部出站请求生效：chat/refresh/checkin/balance/report/travel/FetchModels。
-		// issue #42 深挖：官网「使用端」列基于出站请求 UA 的服务端归因，官方 WorkBuddy
-		// 桌面 UA 为 `WorkBuddy/<version>`。指纹净化考虑：默认值保持现状（可配而非改死），
-		// 仅当用户显式配置才改写。
+		// 默认值已对齐官方 WorkBuddy 桌面形态（三段式），用户仍可配完全自定义值改写。
 		UserAgent string `json:"user_agent"`
+		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与归属头
+		// X-IDE-Version）。空 = 内置默认（对齐官方 5.5.4 分发包）。
+		ClientVersion string `json:"client_version"`
+		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.137.1）。
+		CliVersion string `json:"cli_version"`
+		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
+		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
+		ClientName string `json:"client_name"`
+		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底；空 = 不注入。
+		// 每号 auth 文件的 device_token 键优先于本项。
+		DeviceToken string `json:"device_token"`
+		// DeviceTokenFile device token 文件路径兜底（宿主落盘的桌面端 token，5 分钟读取缓存）。
+		DeviceTokenFile string `json:"device_token_file"`
+		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
+		PassthroughIP bool `json:"passthrough_ip"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -88,9 +114,9 @@ type Config struct {
 	} `json:"features"`
 
 	Prompt struct {
-		// Mode custom（默认）= 网关用自有系统提示词替换客户端 system/developer；
-		// passthrough = 透传客户端原始 system（降级重试仍会切到 Degraded）。
-		Mode string `json:"mode"` // "custom" / "passthrough"
+		// Mode passthrough（默认）= 透传客户端原始 system（降级重试仍会切到 Degraded）；
+		// custom = 网关用自有系统提示词替换客户端 system/developer。
+		Mode string `json:"mode"` // "passthrough" / "custom"
 		// File 提示词文件路径；空 = 内置默认 defaultprompt.md；
 		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到内置默认）。
 		File string `json:"file"`
@@ -105,12 +131,21 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		MaxInFlight        int     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
-		BreakerThreshold   int     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
-		BreakerCooldown    string  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax string  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		MaxInFlight        int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		MaxInFlightGlobal  int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 风控紧域压低并发），0 = 回落默认 2
+		BreakerThreshold   int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerCooldown    string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		// 连败降权（issue #114）：ErrClient/传输层这类「不罚号」失败连续计数，达阈
+		// 临时出池。与冷却/熔断并存取更长者不叠加。默认 5 次 / 10m。
+		DegradeThreshold   int     `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
+		DegradeCooldown    string  `json:"degrade_cooldown"`     // 降权时长，默认 "10m"
+		DegradeCooldownMax string  `json:"degrade_cooldown_max"` // 降权封顶，默认 "2h"
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
 		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
+		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到/余额刷新时，到期时间在
+		// 此窗口内的积分被标记为"快过期"，选号优先消耗。空/0 = 禁用分桶。
+		ExpiringSoon string `json:"expiring_soon"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -124,9 +159,12 @@ type Config struct {
 	SoftRateMaxDur         time.Duration `json:"-"`
 	BreakerCooldownDur     time.Duration `json:"-"`
 	BreakerCooldownMaxD    time.Duration `json:"-"`
+	DegradeCooldownDur     time.Duration `json:"-"`
+	DegradeCooldownMaxD    time.Duration `json:"-"`
 	SessionTTL             time.Duration `json:"-"`
 	SessionGCInterval      time.Duration `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
+	ExpiringSoonDur        time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -158,14 +196,25 @@ func Default() *Config {
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
 	c.Upstream.IdleTimeoutSeconds = 0
+	// Global.Enabled 缺省 true（纯 CN 行为不变：CN 账号恒判 cn，global base 不被使用）；
+	// ChatBase/BillingBase 缺省空（回落内置默认）。
+	c.Global.Enabled = true
 	c.Features.SanitizeBlacklistFingerprints = true
-	c.Prompt.Mode = "custom" // 缺省 custom：网关自有提示词从源头消灭 system 指纹误报
+	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	c.Pool.MaxInFlight = 3
+	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403 修复
+	// P1-1）；0/负数 normalize 回落默认（与 max_in_flight 的 0=不限语义不同，分档键
+	// 的 0 没有合理语义，回退分档默认最稳）。
+	c.Pool.MaxInFlightGlobal = 2
 	c.Pool.BreakerThreshold = 3
 	c.Pool.BreakerCooldown = "30m"
 	c.Pool.BreakerCooldownMax = "6h"
+	c.Pool.DegradeThreshold = 5
+	c.Pool.DegradeCooldown = "10m"
+	c.Pool.DegradeCooldownMax = "2h"
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
+	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -291,6 +340,26 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_USER_AGENT"); v != "" {
 		c.Upstream.UserAgent = v
 	}
+	if v := os.Getenv("WB2A_CLIENT_VERSION"); v != "" {
+		c.Upstream.ClientVersion = v
+	}
+	if v := os.Getenv("WB2A_CLI_VERSION"); v != "" {
+		c.Upstream.CliVersion = v
+	}
+	if v := os.Getenv("WB2A_CLIENT_NAME"); v != "" {
+		c.Upstream.ClientName = v
+	}
+	if v := os.Getenv("WB2A_DEVICE_TOKEN"); v != "" {
+		c.Upstream.DeviceToken = v
+	}
+	if v := os.Getenv("WB2A_DEVICE_TOKEN_FILE"); v != "" {
+		c.Upstream.DeviceTokenFile = v
+	}
+	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.PassthroughIP = b
+		}
+	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
@@ -301,6 +370,9 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_PROMPT_FILE"); v != "" {
 		c.Prompt.File = v
+	}
+	if v := os.Getenv("WB2A_EXPIRING_SOON"); v != "" {
+		c.Pool.ExpiringSoon = v
 	}
 }
 
@@ -327,14 +399,40 @@ func (c *Config) normalize() error {
 	if c.BreakerCooldownMaxD, err = time.ParseDuration(c.Pool.BreakerCooldownMax); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown_max: %w", err)
 	}
+	if c.DegradeCooldownDur, err = time.ParseDuration(c.Pool.DegradeCooldown); err != nil {
+		return fmt.Errorf("pool.degrade_cooldown: %w", err)
+	}
+	if c.DegradeCooldownMaxD, err = time.ParseDuration(c.Pool.DegradeCooldownMax); err != nil {
+		return fmt.Errorf("pool.degrade_cooldown_max: %w", err)
+	}
 	if c.SessionTTL, err = time.ParseDuration(c.SessionSticky.TTL); err != nil {
 		return fmt.Errorf("session_sticky.ttl: %w", err)
 	}
 	if c.SessionGCInterval, err = time.ParseDuration(c.SessionSticky.GCInterval); err != nil {
 		return fmt.Errorf("session_sticky.gc_interval: %w", err)
 	}
+	// 快过期窗口：空 = 禁用（ExpiringSoonDur 0）；非空必须可解析（拼写错误 fail fast）。
+	if c.Pool.ExpiringSoon != "" {
+		if c.ExpiringSoonDur, err = time.ParseDuration(c.Pool.ExpiringSoon); err != nil {
+			return fmt.Errorf("pool.expiring_soon: %w", err)
+		}
+	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3
+	}
+	// 连败降权参数缺省归一（非法/未设置回落默认，与 breaker_threshold 同风格）。
+	if c.Pool.DegradeThreshold <= 0 {
+		c.Pool.DegradeThreshold = 5
+	}
+	if c.Pool.DegradeCooldown == "" {
+		c.Pool.DegradeCooldown = "10m"
+	}
+	if c.Pool.DegradeCooldownMax == "" {
+		c.Pool.DegradeCooldownMax = "2h"
+	}
+	// global 在途分档：0/负数视为未设置回落默认 2（WAF 403 修复 P1-1）。
+	if c.Pool.MaxInFlightGlobal <= 0 {
+		c.Pool.MaxInFlightGlobal = 2
 	}
 	if c.Pool.IdleWeightPerHour <= 0 {
 		c.Pool.IdleWeightPerHour = 0.5
@@ -393,12 +491,12 @@ func (c *Config) normalize() error {
 // passthrough 模式不加载文本（透传客户端原始 system，文本在降级时用 prompt.Degraded）。
 func (c *Config) normalizePrompt() error {
 	switch m := strings.ToLower(strings.TrimSpace(c.Prompt.Mode)); m {
-	case "", "custom":
-		c.Prompt.Mode = "custom"
-	case "passthrough":
+	case "", "passthrough":
 		c.Prompt.Mode = "passthrough"
+	case "custom":
+		c.Prompt.Mode = "custom"
 	default:
-		return fmt.Errorf("prompt.mode: %q 不是合法值（custom / passthrough）", c.Prompt.Mode)
+		return fmt.Errorf("prompt.mode: %q 不是合法值（passthrough / custom）", c.Prompt.Mode)
 	}
 	if c.Prompt.Mode == "custom" {
 		text, err := prompt.Load(c.Prompt.Mode, c.Prompt.File)

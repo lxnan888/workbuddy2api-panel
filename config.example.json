@@ -24,17 +24,28 @@
     "balance_refresh_enabled": true,
     "balance_refresh_minutes": 5
   },
+  "global": {
+    "enabled": true,
+    "chat_base": "",
+    "billing_base": ""
+  },
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
-    "user_agent": ""
+    "user_agent": "",
+    "client_version": "",
+    "cli_version": "",
+    "client_name": "",
+    "device_token": "",
+    "device_token_file": "",
+    "passthrough_ip": false
   },
   "features": {
     "sanitize_blacklist_fingerprints": true
   },
   "prompt": {
-    "mode": "custom",
+    "mode": "passthrough",
     "file": ""
   },
   "upstash": {
@@ -43,11 +54,16 @@
   },
   "pool": {
     "max_in_flight": 3,
+    "max_in_flight_global": 2,
     "breaker_threshold": 3,
     "breaker_cooldown": "30m",
     "breaker_cooldown_max": "6h",
+    "degrade_threshold": 5,
+    "degrade_cooldown": "10m",
+    "degrade_cooldown_max": "2h",
     "idle_weight_per_hour": 0.5,
-    "idle_weight_max": 5.0
+    "idle_weight_max": 5.0,
+    "expiring_soon": "168h"
   },
   "session_sticky": {
     "enabled": true,

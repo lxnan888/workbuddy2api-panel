@@ -11,13 +11,22 @@ import (
 
 // PrepareBodyOpt 单 pass 改写；sanitize=false 时行为完全还原（仅强制 stream + 归一化 tool_choice）。
 func PrepareBodyOpt(src []byte, sanitize bool) []byte {
-	return PrepareBodyOptWithEfforts(src, sanitize, nil)
+	return PrepareBodyOptWithEffortsAndDefault(src, sanitize, nil, nil)
 }
 
 // PrepareBodyOptWithEfforts 在 PrepareBodyOpt 基础上按模型 supportedEfforts 降级 reasoning_effort：
 // 仅当请求显式携带且模型不支持该档位时，改为 ≤请求档位的最高支持档；支持档全部高于请求档时取最低档；
 // 未知模型/未知档位/未携带该字段一律透传。efforts 为 nil 表示未知（不降级）。
+//
+// 向后兼容封装：不传 defaultEfforts（无模型声明默认档），thinking.go 回退硬编码 high。
 func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]string) []byte {
+	return PrepareBodyOptWithEffortsAndDefault(src, sanitize, efforts, nil)
+}
+
+// PrepareBodyOptWithEffortsAndDefault 完整管线：efforts 降级 + thinking.go 按
+// defaultEfforts（模型声明默认档）补档。defaultEfforts 为 nil 时与旧行为一致
+// （deepseek 缺档回退硬编码 high）。
+func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string) []byte {
 	if len(src) == 0 {
 		return src
 	}
@@ -26,12 +35,37 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 		return src
 	}
 	obj["stream"] = true
+	// max_completion_tokens → max_tokens 翻译（吸收上游 PR #116，Closes #117）：
+	// OpenAI 规范里 max_tokens 已 deprecated、max_completion_tokens 是新字段；
+	// DeepSeek Harness 等新客户端只发别名。WorkBuddy 上游（CN /v2 与 global
+	// /console 同源）只认 max_tokens——别名透传会被上游忽略后回落默认输出上限
+	// （实测 32000），长流任务被截。
+	translateMaxCompletionTokens(obj)
+	// stream_options 仅当 body 未显式带时补 {include_usage: true}（D7）：
+	// 官方 CLI 流式必发该字段，上游据此在末帧返回 usage 用量；显式带则不覆盖。
+	if _, has := obj["stream_options"]; !has {
+		obj["stream_options"] = map[string]any{"include_usage": true}
+	}
 	normalizeToolChoice(obj)
 	normalizeRoles(obj)
+	// tool 配对两步（见 tool_pairing.go）：先重排再清理。所有模型一律执行（独立于
+	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
+	// tool_calls/tool 结果会让上游对之后每条消息都返 400，必须先行剔除；
+	// 插在结果中间的非 tool 消息（Codex image_resize_notice）同样判配对断裂，
+	// 先 repack 挪后，再 cleanup 删孤儿，两侧同口径。
+	if msgs, ok := obj["messages"].([]any); ok {
+		msgs, _ = repackToolResultBlocks(msgs)
+		msgs, _ = cleanupOrphanToolCalls(msgs)
+		// 无改动时两步都返回原 slice，这里回写等于零操作；任一步重排/删除
+		// （哪怕后续步骤零改动）也必须落到 obj——不能只在「最后一步改动」时回写，
+		// 否则 repack 单独生效的结果会被原 slice 覆盖丢失。
+		obj["messages"] = msgs
+	}
 	// DeepSeek 思维链开关（见 thinking.go）：注入 thinking.type=enabled + 缺档补默认档。
 	// 先于 normalizeReasoningEffort 执行：补入的默认档也要走既有降级管线，
 	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。
-	injectThinking(obj)
+	modelName, _ := obj["model"].(string)
+	injectThinking(obj, lookupDefaultEffort(defaultEfforts, modelName))
 	normalizeReasoningEffort(obj, efforts)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
@@ -46,6 +80,39 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 		return src
 	}
 	return out
+}
+
+// translateMaxCompletionTokens 把 OpenAI 别名 max_completion_tokens 翻译为上游
+// 认的 max_tokens（吸收上游 PR #116）。规则：显式 max_tokens 优先（别名只删）；
+// 别名非正数值（0/null/负数）不翻译（0/null 语义是「未设置」，负数是非法值，
+// 翻译等于把垃圾搬进 max_tokens）；非数值别名（字符串等畸形）不翻译（原样
+// 透传由上游报 11101 参数错）。两域同口径：CN /v2 与 global /console 是同一套
+// API，翻译不分 realm。
+func translateMaxCompletionTokens(obj map[string]any) {
+	alias, has := obj["max_completion_tokens"]
+	delete(obj, "max_completion_tokens") // 无论翻译与否，别名一律删（减少 body 体积与排障噪音）
+	if !has {
+		return
+	}
+	if _, explicit := obj["max_tokens"]; explicit {
+		return // 显式 max_tokens 优先：别名只删不译
+	}
+	// json.Unmarshal 数字 → float64（整数去整后回写，避免 1.28e5 科学计数法/小数
+	// 尾巴进上游 body）；其他数值类型防御性兼容（int 家族——手构造 map 的调用方）。
+	switch v := alias.(type) {
+	case float64:
+		if v > 0 && v == float64(int64(v)) {
+			obj["max_tokens"] = int64(v)
+		}
+	case int64:
+		if v > 0 {
+			obj["max_tokens"] = v
+		}
+	case int:
+		if v > 0 {
+			obj["max_tokens"] = int64(v)
+		}
+	}
 }
 
 // effortRank 档位从低到高。
@@ -144,6 +211,36 @@ func normalizeRoles(obj map[string]any) {
 			log.Printf("role normalized developer->system idx=%d", i)
 		}
 	}
+}
+
+// ensureConsoleSystem global realm 兜底 system 注入（吸收 PR #45，防 console 域上游 code 11-128）：
+// 首条消息非 system 时在 messages 最前补一条 fallback system（"You are a helpful assistant."）。
+// 仅对 global 请求调用（CN 现状不动；即使首条就是 system 也不重复注入）。
+// body 不可解析时原样返回（与 prepareBody 语义一致：坏 body 不在这里二次错误化）。
+func ensureConsoleSystem(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return body
+	}
+	first, ok := msgs[0].(map[string]any)
+	if ok {
+		if role, _ := first["role"].(string); strings.EqualFold(strings.TrimSpace(role), "system") {
+			return body // 首条已是 system：不注入
+		}
+	}
+	obj["messages"] = append([]any{map[string]any{"role": "system", "content": "You are a helpful assistant."}}, msgs...)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // normalizeToolChoice 按上游 Go struct（string 类型）改写 OpenAI tool_choice。
