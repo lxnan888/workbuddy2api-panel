@@ -18,6 +18,59 @@
 
 ---
 
+> ### 本仓库是 fork：`lxnan888/workbuddy2api-panel`
+>
+> 相对上游 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)
+> （作者已于 2026-10-21 停止维护）的差异，全部已在本仓库 CI 构建并验证：
+>
+> | 改动 | 说明 |
+> |---|---|
+> | **面板账号表修复** | `internal/panel/app.js` 的 `rateLimitMeta()` 在严格模式下对未声明的 `detail` 赋值，账号一旦带 `rate_limited_models`（例如上游 429 `code=6004`）就抛 `ReferenceError`，`renderAccounts` 整段中断——表现为「账号池」表格空白而顶部统计正常。已补声明。 |
+> | **裸模型 ID 开关** | 新增 `models.bare_ids`（默认 `false`）。开启后 `GET /v1/models` 只返回裸模型名，两域同名去重（首选域在前，另一域独占的追加在后）。 |
+> | **裸名首选域** | 新增 `pool.preferred_realm`（`cn` 默认 / `global`）。只影响不带 `cn:` / `global:` 前缀的请求先试哪个域，显式前缀永不被改写。 |
+> | **跨域回退默认开启** | `pool.cross_domain_fallback` 默认值由 `false` 改为 `true`：首选域选不到可用账号时自动换另一域再选一次。需要严格锁域时显式设为 `false`。 |
+> | **提示词配置提示修正** | `prompt.mode` / `prompt.file` / `prompt.text` 在进程启动时固化，已补进面板的「保存后需重启」清单（此前保存成功却不提示，容易误判为没生效）。 |
+>
+> 镜像：`ghcr.io/lxnan888/wb2api-panel:latest`（多架构 amd64/arm64，公开可拉）。
+> 面板「配置 → 模型 ID 与跨域路由」可直接改上面两项，保存即生效，无需重启。
+>
+> 上游原 README 的停维护/合规声明仍然适用，使用前请自行评估风险。
+
+---
+
+## 思考档位（reasoning_effort）两域实测
+
+> 测试方法：绕过网关，用真实账号直连 `copilot.tencent.com`（国内）与 `www.workbuddy.ai`（国际）
+> 的 `/v2/chat/completions`，逐模型 × 逐档位发一次最小请求（`max_tokens=8`），
+> 记录 HTTP 状态与业务码。国内 21 个模型 × 6 档 = 126 次，国际 35 个模型 × 6 档 = 210 次。
+> 原始数据：[`effort_cn.csv`](effort_cn.csv) / [`effort_gl.csv`](effort_gl.csv)。
+
+**结论一：上游不按模型限制档位，只校验枚举值。**
+
+- 非法值（如 `bogus123`）→ 400：国内 `11133`「request parameters were rejected by the model」，
+  国际 `11-128`「request illegal」。
+- 合法值 `minimal / low / medium / high / xhigh / max` → **只要该模型本身能调通，6 档全部 200**。
+- 国内 21 个模型：**每一档都 200，零 400**（含目录里只声明 `['high']` 的 `hy4-preview`、
+  只声明 `['medium']` 的 `glm-5.1`，传 `max` 照样 200）。
+- 国际 35 个模型：同一模型的 6 档结果**完全一致**——要么全 200，要么全失败（`11158` 账号未开通该模型 /
+  `11102` 模型不存在 / `11-128` 触发风控），不存在「只有某档被拒」的情况。
+
+**结论二：`supported_efforts` 只是「官方客户端该显示哪些档」的建议，不是硬限制。**
+
+网关原先按目录做「取 ≤ 请求档位的最高支持档」，于是 `max` 被静默改成 `xhigh`（如 `glm-5.2`、
+`deepseek-v4-pro`）或 `high`（如国际版 `deepseek-v4.1-flash`），日志只有一行
+`reasoning_effort downgraded`，客户端无感。实测表明这类降级**没有必要**。
+
+**结论三：国际版同样能传 `max`。** `deepseek-v4.1-flash` 在国际版目录里只声明 `['high']`，但实测
+`max` 返回 200，且同提示词下 thinking tokens 明显高于 `high`（单样本 311 vs 200，仅供参考；
+样本噪声大，要定论需多次采样取中位数）。
+
+> 如果你想保留 `max`：目前需要改代码（`internal/upstream/payload.go` 的
+> `normalizeReasoningEffort`）。建议的收敛方向是「只校验枚举合法性，不再按模型目录降级」，
+> 或加一个开关默认关闭降级、遇 400 再回退重试一次。
+
+---
+
 > [!IMPORTANT]
 > **项目已停止维护（2026-10-21）**：后续不再更新代码、不跟进上游变化、不再处理新的 issue / PR。
 >
@@ -247,7 +300,7 @@ mkdir -p auths data && cp config.example.json config.json
 docker run -d --name workbuddy2api \
   -p 7863:7863 -e TZ=Asia/Shanghai \
   -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
-  ghcr.io/linguo2625469/workbuddy2api-panel:latest
+  ghcr.io/lxnan888/wb2api-panel:latest
 
 # 3. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
@@ -255,6 +308,7 @@ curl -s http://localhost:7863/healthz
 
 > **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `workbuddy2api-panel` →
 > Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
+> 本 fork 的 `wb2api-panel` 已是公开包，可直接匿名 `docker pull`。
 >
 > 镜像 tag 规则：`main` 分支推送 `latest` / `main` / `sha-xxxxxx`；打 `v*` tag 额外发布
 > `1.2.3` / `1.2` / `1` 语义化版本；PR 仅构建验证、不推送。
@@ -263,7 +317,7 @@ curl -s http://localhost:7863/healthz
 
 ```bash
 # 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
+git clone https://github.com/lxnan888/workbuddy2api-panel.git
 cd workbuddy2api-panel
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
