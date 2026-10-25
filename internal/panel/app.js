@@ -264,6 +264,10 @@ function rateLimitMeta(row, now) {
     };
   }
   const title = [model, resetAt ? '上游重置：' + fmtLocalDateTime(resetAt) : '上游重置：时间未知'];
+  // 严格模式（文件顶部 'use strict'）下严禁未声明赋值：此前两个分支都是裸
+  // `detail = ...`，一旦账号带限流记录就抛 ReferenceError，renderAccounts 整段
+  // 中断 —— 表现为面板「账号池」表格空白（顶部统计仍正常）。此声明不可删。
+  let detail;
   if (until && resetAt && until < resetAt) {
     // 双时钟（issue #171 问题二）：黄框出现/消失由 until 决定（网关为防超长
     // 限流拖死全池，把重试封顶在 now+softRateMax），主文字却按 resetAt 显示，
