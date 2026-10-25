@@ -75,6 +75,10 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	// 先于 normalizeReasoningEffort 执行，让补入的默认档也过一遍枚举校验。
 	modelName, _ := obj["model"].(string)
 	injectThinking(obj, lookupDefaultEffort(defaultEfforts, modelName))
+	// 有默认档的模型补默认档：实测 glm-5.1 这类「只思考」模型不带 reasoning_effort
+	// 会被上游拒（11133 request parameters were rejected by the model provider），
+	// 带上默认档即 200。仅当客户端没写、且没显式关思考时补。
+	ensureDefaultEffort(obj, modelName, efforts)
 	normalizeReasoningEffort(obj)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
@@ -200,6 +204,48 @@ func normalizeReasoningEffort(obj map[string]any) {
 	obj[key] = defaultEffortOnInvalid
 	model, _ := obj["model"].(string)
 	log.Printf("reasoning_effort invalid model=%s %q -> %s", model, raw, defaultEffortOnInvalid)
+}
+
+// ensureDefaultEffort 客户端未携带 reasoning_effort 时，为「只有一个合法档位」的模型补上它。
+//
+// 背景：实测（2026-10-25）glm-5.1 不带 effort 会被上游 400 11133「request parameters
+// were rejected by the model provider」，带 reasoning_effort=medium 即 200——它是
+// 「只思考」模型，effort 是必填项。此前只有 DeepSeek 系会经 injectThinking 补档。
+//
+// 保守边界：只在档位集合**恰好一个**时注入（多档模型交回上游默认，避免替客户端决定
+// 思考强度而改变行为/费用）；非合法枚举不注入；显式 thinking.type=disabled 也不注入。
+// 档位集合来源：远端探测桶优先，空则两域静态表（cn 优先）。
+func ensureDefaultEffort(obj map[string]any, model string, efforts map[string][]string) {
+	if model == "" {
+		return
+	}
+	if _, ok := obj["reasoning_effort"]; ok {
+		return
+	}
+	if _, ok := obj["reasoningEffort"]; ok {
+		return
+	}
+	if th, ok := obj["thinking"].(map[string]any); ok {
+		if t, _ := th["type"].(string); strings.EqualFold(strings.TrimSpace(t), "disabled") {
+			return
+		}
+	}
+	supported := efforts[model]
+	if len(supported) == 0 {
+		if c, ok := cnEffortFallback[model]; ok {
+			supported = c.efforts
+		} else if c, ok := globalEffortFallback[model]; ok {
+			supported = c.efforts
+		}
+	}
+	if len(supported) != 1 {
+		return
+	}
+	v := strings.TrimSpace(strings.ToLower(supported[0]))
+	if _, ok := validEfforts[v]; !ok {
+		return
+	}
+	obj["reasoning_effort"] = v
 }
 
 // normalizeRoles 把 messages 里的 developer 角色归一为 system。
