@@ -105,18 +105,22 @@ func TestPrepareBodyOptWithEfforts(t *testing.T) {
 		wantKey string // 输出应带有的 effort 字段名；空表示该字段应不存在
 		wantVal string // 期望值
 	}{
-		{"downgrade to highest supported at or below request",
-			`{"model":"glm-5.2-mini","reasoning_effort":"high"}`, efforts, "reasoning_effort", "medium"},
-		{"floor to lowest when all supported above request",
-			`{"model":"glm-5.2-max","reasoning_effort":"low"}`, efforts, "reasoning_effort", "high"},
+		// 2026-10-25 实测后收敛：上游只校验枚举值，不按模型 supportedEfforts 降级，
+		// 因此目录里「没有」的档位也原样出站；只有非法枚举值才换成默认档 high。
+		{"max passes through regardless of catalog",
+			`{"model":"glm-5.2-mini","reasoning_effort":"max"}`, efforts, "reasoning_effort", "max"},
+		{"catalog-narrowed value passes through",
+			`{"model":"glm-5.2-mini","reasoning_effort":"high"}`, efforts, "reasoning_effort", "high"},
 		{"supported effort passes through unchanged",
 			`{"model":"glm-5.2","reasoning_effort":"low"}`, efforts, "reasoning_effort", "low"},
-		{"camelCase field name downgrades and keeps key",
-			`{"model":"glm-5.2-mini","reasoningEffort":"high"}`, efforts, "reasoningEffort", "medium"},
+		{"camelCase field name keeps key and value",
+			`{"model":"glm-5.2-mini","reasoningEffort":"max"}`, efforts, "reasoningEffort", "max"},
 		{"unknown model passes through",
 			`{"model":"unknown","reasoning_effort":"max"}`, efforts, "reasoning_effort", "max"},
-		{"unknown effort value passes through",
-			`{"model":"glm-5.2","reasoning_effort":"ultra"}`, efforts, "reasoning_effort", "ultra"},
+		{"invalid effort value normalized to default",
+			`{"model":"glm-5.2","reasoning_effort":"ultra"}`, efforts, "reasoning_effort", "high"},
+		{"off is not a valid effort",
+			`{"model":"glm-5.2","reasoning_effort":"off"}`, efforts, "reasoning_effort", "high"},
 		{"empty cache passes through",
 			`{"model":"glm-5.2","reasoning_effort":"max"}`, map[string][]string{}, "reasoning_effort", "max"},
 		{"no effort field untouched",

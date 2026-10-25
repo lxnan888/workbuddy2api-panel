@@ -72,11 +72,10 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 		obj["messages"] = msgs
 	}
 	// DeepSeek 思维链开关（见 thinking.go）：注入 thinking.type=enabled + 缺档补默认档。
-	// 先于 normalizeReasoningEffort 执行：补入的默认档也要走既有降级管线，
-	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。
+	// 先于 normalizeReasoningEffort 执行，让补入的默认档也过一遍枚举校验。
 	modelName, _ := obj["model"].(string)
 	injectThinking(obj, lookupDefaultEffort(defaultEfforts, modelName))
-	normalizeReasoningEffort(obj, efforts)
+	normalizeReasoningEffort(obj)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)
@@ -157,26 +156,28 @@ func clampGPTMinMaxTokens(obj map[string]any) {
 	}
 }
 
-// effortRank 档位从低到高。
-var effortRank = map[string]int{"off": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5, "max": 6}
+// validEfforts 上游实测接受的思考档位枚举。
+//
+// 实测口径（2026-10-25，直连两域上游，逐模型 × 逐档位）：
+//   - 国内 21 个模型 × 6 档 = 126 次，全部 200；
+//   - 国际 35 个模型 × 6 档 = 210 次，同一模型六档结果一致（要么全 200，要么因账号未开通
+//     模型 11158 / 模型不存在 11102 / 风控 11-128 全失败），不存在「只有某档被拒」；
+//   - 非法值（bogus123、off）两域均 400（国内 11133、国际 11-128）。
+//
+// 结论：上游只校验枚举值，不按模型限制档位。故这里不再按 supportedEfforts 降级
+// （那会把客户端要的 max 静默削成 xhigh/high），只把非法值换成安全默认档。
+var validEfforts = map[string]struct{}{
+	"minimal": {}, "low": {}, "medium": {}, "high": {}, "xhigh": {}, "max": {},
+}
 
-// normalizeReasoningEffort 按模型 supportedEfforts 降级 reasoning_effort（snake/camel 双字段兼容）。
-//   - 请求档位模型支持 → 原样透传
-//   - 请求档位不支持 → 改为 ≤请求档位的最高支持档（降级）
-//   - 支持档全部高于请求档 → 取最低支持档（偏离最小）
-//   - 未知模型/未知档位/未携带字段/模型未缓存 → 一律透传
-func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
-	if len(efforts) == 0 {
-		return
-	}
-	model, _ := obj["model"].(string)
-	if model == "" {
-		return
-	}
-	supported, ok := efforts[model]
-	if !ok || len(supported) == 0 {
-		return
-	}
+// defaultEffortOnInvalid 非法档位回落值：high 是两域全部实测模型都接受的档位。
+const defaultEffortOnInvalid = "high"
+
+// normalizeReasoningEffort 只做枚举合法性归一（snake/camel 双字段兼容）。
+//   - 合法档位 → 原样透传（不再按模型目录降级）
+//   - 非法档位（拼错 / off / 空串）→ 换成 defaultEffortOnInvalid，避免上游 400
+//   - 未携带字段 / 非字符串 → 不动
+func normalizeReasoningEffort(obj map[string]any) {
 	key := ""
 	if _, present := obj["reasoning_effort"]; present {
 		key = "reasoning_effort"
@@ -185,42 +186,20 @@ func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	} else {
 		return
 	}
-	reqStr, ok := obj[key].(string)
+	raw, ok := obj[key].(string)
 	if !ok {
 		return
 	}
-	reqStr = strings.TrimSpace(strings.ToLower(reqStr))
-	reqIdx, known := effortRank[reqStr]
-	if !known {
-		return
-	}
-	// 在 ≤请求档位的支持档里选最高档；命中且与请求不同才改写。
-	best, bestIdx := "", -1
-	for _, s := range supported {
-		idx, k := effortRank[strings.TrimSpace(strings.ToLower(s))]
-		if k && idx <= reqIdx && idx > bestIdx {
-			best, bestIdx = s, idx
-		}
-	}
-	if best != "" {
-		if !strings.EqualFold(best, reqStr) {
-			obj[key] = best
-			log.Printf("reasoning_effort downgraded model=%s %s -> %s", model, reqStr, best)
+	val := strings.TrimSpace(strings.ToLower(raw))
+	if _, ok := validEfforts[val]; ok {
+		if val != raw {
+			obj[key] = val
 		}
 		return
 	}
-	// 支持档全部高于请求档：取最低支持档。
-	lowest, lowestIdx := "", 1<<30
-	for _, s := range supported {
-		idx, k := effortRank[strings.TrimSpace(strings.ToLower(s))]
-		if k && idx < lowestIdx {
-			lowest, lowestIdx = s, idx
-		}
-	}
-	if lowest != "" {
-		obj[key] = lowest
-		log.Printf("reasoning_effort floored model=%s %s -> %s", model, reqStr, lowest)
-	}
+	obj[key] = defaultEffortOnInvalid
+	model, _ := obj["model"].(string)
+	log.Printf("reasoning_effort invalid model=%s %q -> %s", model, raw, defaultEffortOnInvalid)
 }
 
 // normalizeRoles 把 messages 里的 developer 角色归一为 system。

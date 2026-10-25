@@ -419,7 +419,12 @@ func (h *Handler) modelList() []map[string]any {
 		entry = applyModelInfoFields(entry, mi)
 		// effort 能力透出——远端 supportedEfforts 权威，缺失落到 CN 静态兜底表
 		// （客户端可发现档位，不再盲传）。无档位 → 省略字段。
-		if efforts, def := upstream.EffortListing("cn", mi.ID, mi.Efforts, mi.DefaultEffort); efforts != nil {
+		efforts, def := upstream.EffortListing("cn", mi.ID, mi.Efforts, mi.DefaultEffort)
+		if efforts == nil && mi.SupportsReasoning {
+			// 目录没给档位但模型明确支持推理：暴露实测全集（上游只校验枚举，不按模型限制）。
+			efforts, def = upstream.MeasuredEfforts, "high"
+		}
+		if efforts != nil {
 			entry["reasoning_supported_efforts"] = efforts
 			if def != "" {
 				entry["reasoning_default_effort"] = def
@@ -461,7 +466,13 @@ func (h *Handler) modelList() []map[string]any {
 			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.HTTP); ok {
 				entry["max_output_tokens"] = mo
 			}
-			if efforts, def := upstream.EffortListing("global", id, globalEfforts[id], globalDefaults[id]); efforts != nil {
+			efforts, def := upstream.EffortListing("global", id, globalEfforts[id], globalDefaults[id])
+			if efforts == nil {
+				if gi, ok := globalInfos[id]; ok && gi.SupportsReasoning {
+					efforts, def = upstream.MeasuredEfforts, "high"
+				}
+			}
+			if efforts != nil {
 				entry["reasoning_supported_efforts"] = efforts
 				if def != "" {
 					entry["reasoning_default_effort"] = def
@@ -639,6 +650,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
 	}
 	defer st.done()
+
+	// 裸模型 ID 模式（models.bare_ids）：对外命名空间只有裸名，带 cn:/global: 前缀的
+	// 请求一律按「模型不存在」拒绝——避免两套命名并存导致客户端靠前缀绕过首选域/回退策略。
+	if live.BareModelIDs && realmExplicit {
+		writeOpenAIErrorHint(w, http.StatusBadRequest, "model_unavailable",
+			"bare model ids are enabled: drop the \"cn:\"/\"global:\" prefix and send the bare model id", "")
+		st.status = http.StatusBadRequest
+		st.outcome = reqlog.OutcomeHTTPError
+		return
+	}
 
 	// models.hidden 黑名单：点名调用直接拒绝，不打上游、不占选号。
 	// 与 /v1/models 的列表过滤对称（只藏列表不够，知道名字仍可硬调）。

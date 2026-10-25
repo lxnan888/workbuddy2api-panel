@@ -348,7 +348,7 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 	if infos[0].DefaultEffort != "high" {
 		t.Errorf("infos[0].DefaultEffort=%q want high", infos[0].DefaultEffort)
 	}
-	// glm-5.2 只支持 low/high，请求 max → 降级为 high
+	// 目录只声明 low/high，但实测上游接受 max：请求 max 必须原样出站（不再按目录降级）。
 	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","reasoning_effort":"max","messages":[]}`), "", ChatMeta{})
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
@@ -358,8 +358,8 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 	if err := json.Unmarshal(outbound, &m); err != nil {
 		t.Fatalf("outbound unmarshal: %v (%s)", err, outbound)
 	}
-	if got, _ := m["reasoning_effort"].(string); got != "high" {
-		t.Errorf("reasoning_effort=%v want high (outbound=%s)", m["reasoning_effort"], outbound)
+	if got, _ := m["reasoning_effort"].(string); got != "max" {
+		t.Errorf("reasoning_effort=%v want max（不按目录降级）(outbound=%s)", m["reasoning_effort"], outbound)
 	}
 }
 

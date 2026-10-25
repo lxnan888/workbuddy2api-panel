@@ -83,13 +83,13 @@ func TestInjectThinkingDefaultEffort(t *testing.T) {
 		t.Errorf("supportedEfforts=[low high] 下默认档=%q want high (out=%s)", eff, out)
 	}
 
-	// 模型只支持 minimal/low → 默认 high 降级到 low（≤high 的最高支持档）。
+	// 模型目录只写 minimal/low：实测上游仍接受 high，故默认档保持 high（不再降级）。
 	out = PrepareBodyOptWithEfforts(
 		[]byte(`{"model":"deepseek-v4-flash","messages":[]}`),
 		false, map[string][]string{"deepseek-v4-flash": {"minimal", "low"}})
 	eff, _ = objFieldString(t, out, "reasoning_effort")
-	if eff != "low" {
-		t.Errorf("supportedEfforts=[minimal low] 下默认档降级=%q want low (out=%s)", eff, out)
+	if eff != "high" {
+		t.Errorf("默认档应保持 high（不按目录降级），got %q (out=%s)", eff, out)
 	}
 
 	// 显式 enabled + 缺 effort → 同样补默认档（官方 configure thinking 行为）。

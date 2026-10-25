@@ -75,32 +75,40 @@ func staticEffortCap(realm, model string) effortCap {
 	return table[model]
 }
 
-// EffortListing 计算模型在 /v1/models 应暴露的 effort 能力（三级查找 + 默认档防御）。
+// MeasuredEfforts 上游实测接受的思考档位全集（按从低到高排列）。
 //
-// remoteEfforts/remoteDefault 为远端（FetchModels / global 探测）已解析值；
-// remoteEfforts 非空时以其为权威（不回落到静态表），否则落到产品级静态兜底表；
-// 两者皆无 → efforts 返回 nil（调用方省略字段，不输出空数组）。
+// 实测口径（2026-10-25，直连两域上游逐模型 × 逐档位，国内 126 次 / 国际 210 次）：
+// 上游只校验枚举值，不按模型限制档位——模型只要能调通，六档全部 200；
+// 非法值（bogus123 / off）两域均 400。因此「应暴露哪些档位」不再抄产品静态表，
+// 一律以实测全集为准；静态表只保留 defaultEffort（默认档）语义。
 //
-// defaultEffort 仅在「efforts 非空且 default 命中 efforts」时才返回
-// （对齐参考仓库 resolveModel 的 `defaultEffort ∈ efforts` 防御：不宣称不支持的默认档）。
-// remoteDefault 空串不回落到静态默认档——默认档随档位表同源：remote 有档位就用 remote 默认档，
-// 静态兜底档位就用静态默认档，避免跨源拼接出「档位是静态、默认档是 remote」的矛盾组合。
+// 注意 off 不在集合内：两域实测均 400（国内 11133、国际 11-128）。
+var MeasuredEfforts = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
+// EffortListing 计算模型在 /v1/models 应暴露的 effort 能力。
+//
+// 语义（2026-10-25 实测后收敛）：
+//   - 模型有「支持推理」的证据（远端 supportedEfforts 非空，或静态兜底表有条目）
+//     → 暴露实测全集 MeasuredEfforts；
+//   - 默认档：远端 defaultEffort 优先，其次静态表 defaultEffort，都没有回落 "high"；
+//   - 无任何证据 → nil（调用方省略字段，不输出空数组，避免宣称不支持的档位）。
+//
+// 保留 remoteEfforts 参数：它是「该模型确实支持推理」的证据来源之一，但不再作为
+// 档位白名单使用（实测证明白名单比上游实际接受范围窄，会导致 max 被无谓降级）。
 func EffortListing(realm, model string, remoteEfforts []string, remoteDefault string) (efforts []string, defaultEffort string) {
-	var src effortCap
-	switch {
-	case len(remoteEfforts) > 0:
-		src = effortCap{efforts: remoteEfforts, defaultEffort: remoteDefault}
-	default:
-		src = staticEffortCap(realm, model)
-	}
-	if len(src.efforts) == 0 {
+	static := staticEffortCap(realm, model)
+	if len(remoteEfforts) == 0 && len(static.efforts) == 0 {
 		return nil, ""
 	}
-	efforts = append([]string(nil), src.efforts...)
-	if src.defaultEffort != "" && containsEffort(efforts, src.defaultEffort) {
-		defaultEffort = src.defaultEffort
+	efforts = append([]string(nil), MeasuredEfforts...)
+	def := remoteDefault
+	if def == "" {
+		def = static.defaultEffort
 	}
-	return efforts, defaultEffort
+	if def == "" || !containsEffort(efforts, def) {
+		def = "high"
+	}
+	return efforts, def
 }
 
 // containsEffort 档位成员判定（精确匹配，对齐参考仓库 `efforts.includes(defaultEffort)`）。
