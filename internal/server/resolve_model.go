@@ -12,13 +12,24 @@ import "strings"
 // 第三个返回值 realmExplicit 供跨域回退（issue #135）判定：只有裸名（false）才允许
 // 在首选域选不到号时改用另一域；显式 cn:/global: 前缀永不被回退改写。
 func resolveModelDetail(model string) (realm, bare string, realmExplicit bool) {
+	return resolveModelDetailDefault(model, "cn")
+}
+
+// resolveModelDetailDefault 同 resolveModelDetail，但裸名的默认域由调用方指定
+// （config pool.preferred_realm："" 或非法值按 "cn" 处理）。
+// 显式前缀分支完全不受 defaultRealm 影响——写死哪个域就用哪个域，这是跨域回退的
+// 前提（realmExplicit=true 时调用方不会改写域）。
+func resolveModelDetailDefault(model, defaultRealm string) (realm, bare string, realmExplicit bool) {
+	if defaultRealm != "global" {
+		defaultRealm = "cn"
+	}
 	idx := strings.IndexByte(model, ':')
 	if idx < 0 {
-		return "cn", model, false
+		return defaultRealm, model, false
 	}
 	prefix := model[:idx]
 	if prefix != "cn" && prefix != "global" {
-		return "cn", model, false
+		return defaultRealm, model, false
 	}
 	return prefix, model[idx+1:], true
 }

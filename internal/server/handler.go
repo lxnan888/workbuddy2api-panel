@@ -384,13 +384,17 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 	return entry
 }
 
-// modelList 模型列表：CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel
-// 对称）；global.enabled=true 时追加 global: 前缀的国际版名单。
+// modelList 模型列表：默认输出 "cn:" / "global:" 前缀（gateway 路由协议，与 resolveModel
+// 对称）；models.bare_ids=true 时改为裸模型名，两域同名只出一条（首选域在前，
+// 另一域独占的追加在后）。
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底。
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
+	// 与 out 平行的来源域标记，供裸 ID 模式做「首选域优先」去重。
+	sources := make([]string, 0, 64)
 	// models.hidden 黑名单：快照外提，避免逐条目重复 Load。
-	hidden := h.loadLive().HiddenModels
+	live := h.loadLive()
+	hidden := live.HiddenModels
 	for _, mi := range h.fetchDynamicModels() {
 		if _, ok := hidden["cn:"+mi.ID]; ok {
 			continue
@@ -422,8 +426,8 @@ func (h *Handler) modelList() []map[string]any {
 			}
 		}
 		out = append(out, entry)
+		sources = append(sources, "cn")
 	}
-	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。
 	// 名单 = 纯动态探测结果（fetchGlobalModels，失败/无号 → 空）。
 	if h.cfg.GlobalEnabled {
 		// global 域 effort 能力三级查找：探测下发桶（权威）→ 静态兜底表 → 省略。
@@ -464,9 +468,43 @@ func (h *Handler) modelList() []map[string]any {
 				}
 			}
 			out = append(out, entry)
+			sources = append(sources, "global")
 		}
 	}
-	return out
+	// 裸模型名模式（models.bare_ids）：剥掉域前缀并按 id 去重。
+	// 顺序 = 首选域在前、另一域独占的追加在后；同名条目保留首选域那份字段
+	// （两域的 credits/能力可能有差异，首选域即实际路由域，透出它更不误导）。
+	if !live.BareModelIDs {
+		return out
+	}
+	pref := live.PreferredRealm
+	if pref != "global" {
+		pref = "cn"
+	}
+	seen := make(map[string]struct{}, len(out))
+	bare := make([]map[string]any, 0, len(out))
+	for pass := 0; pass < 2; pass++ {
+		for i, entry := range out {
+			firstPass := sources[i] == pref
+			if (pass == 0) != firstPass {
+				continue
+			}
+			id, _ := entry["id"].(string)
+			if idx := strings.IndexByte(id, ':'); idx >= 0 {
+				id = id[idx+1:]
+			}
+			if id == "" {
+				continue
+			}
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			entry["id"] = id
+			bare = append(bare, entry)
+		}
+	}
+	return bare
 }
 
 // fetchGlobalModels 返回 global 模型名单（纯动态探测结果）及被探测账号。
@@ -579,8 +617,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
-	// 裸名 → ("cn", 原串)，CN 现状零回归。
-	realm, bareModel, realmExplicit := resolveModelDetail(peek.Model)
+	// 裸名 → (pool.preferred_realm, 原串)；未配置时回落 cn（CN 现状零回归）。
+	live := h.loadLive()
+	realm, bareModel, realmExplicit := resolveModelDetailDefault(peek.Model, live.PreferredRealm)
 	modelRate := ""
 	if h.cfg.Upstream != nil {
 		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)

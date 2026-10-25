@@ -21,6 +21,11 @@ type Snapshot struct {
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
 	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
 	HiddenModels         map[string]struct{} // 精确隐藏的模型 id（已归一化为 "cn:x"/"global:x" 全量形式）；nil = 不隐藏
+	// BareModelIDs 模型列表是否只暴露裸模型名（models.bare_ids）。热改安全。
+	BareModelIDs bool
+	// PreferredRealm 裸模型名的首选域（pool.preferred_realm）："cn"/"global"。
+	// 空串按 "cn" 解释（与 config.normalize 的兜底一致）。热改安全。
+	PreferredRealm string
 }
 
 // Holder 原子持有当前快照。

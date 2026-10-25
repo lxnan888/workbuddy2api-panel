@@ -179,6 +179,12 @@ type Config struct {
 		// 生效点：GET /v1/models 列表过滤 + POST /v1/chat/completions 点名拒绝。
 		// 面板保存后经 livecfg 热生效，无需重启。
 		Hidden []string `json:"hidden"`
+		// BareIDs 模型列表是否只暴露裸模型名（默认 false = 现状，带 "cn:"/"global:" 前缀）。
+		// 开启后 GET /v1/models 的 id 不带域前缀，两域同名只输出一条（首选域在前，另一域
+		// 独占的追加在后）；POST /v1/chat/completions 仍兼容显式前缀，语义不变。
+		// 裸 ID 的路由由 pool.preferred_realm（首选域）+ pool.cross_domain_fallback
+		// （选不到号时是否跨域）共同决定。面板保存后经 livecfg 热生效，无需重启。
+		BareIDs bool `json:"bare_ids"`
 	} `json:"models"`
 
 	Prompt struct {
@@ -234,12 +240,17 @@ type Config struct {
 		// tier 0（免费）/ tier 1（无观测）不受限；签到回血越过 floor 自动恢复。
 		// 默认 0 = 关闭；负值钳 0。
 		CreditFloor int64 `json:"credit_floor"`
-		// CrossDomainFallback 裸模型名跨域回退开关（issue #135），默认 false（零回归）。
-		// 开启后：请求模型名不带 realm 前缀时，首选域（cn）选不到可用账号（账号级冷却/
-		// 熔断/在途占满，或该域账号对这个模型 11102 后进入模型级负缓存）会自动改用
-		// 另一域再选一次；显式 cn:/global: 前缀不受影响，行为与引入前完全一致。
-		// 语义取舍：跨域会消耗另一个域的额度，属策略选择，故默认关闭、显式开启。
+		// CrossDomainFallback 裸模型名跨域回退开关（issue #135），默认 true。
+		// 开启后：请求模型名不带 realm 前缀时，首选域（pool.preferred_realm）选不到可用
+		// 账号（账号级冷却/熔断/在途占满，或该域账号对这个模型 11102 后进入模型级负缓存）
+		// 会自动改用另一域再选一次；显式 cn:/global: 前缀不受影响，行为与引入前完全一致。
+		// 语义取舍：跨域会消耗另一个域的额度，属策略选择；本 fork 默认开启（客户端只写
+		// 一个模型名即可跟随账号池），需要严格锁域时显式关掉即可。
 		CrossDomainFallback bool `json:"cross_domain_fallback"`
+		// PreferredRealm 裸模型名的首选域（"cn" 国内优先 / "global" 国际优先），默认 "cn"。
+		// 只影响「不带前缀」的请求先试哪个域；显式前缀永不改写。首选域选不到号时是否
+		// 换域由上面的 cross_domain_fallback 决定。
+		PreferredRealm string `json:"preferred_realm"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -326,6 +337,10 @@ func Default() *Config {
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.PreferExpiring = true
+	// 裸模型名跨域回退：本 fork 默认开启（客户端只写一个模型名即可跟随账号池）。
+	c.Pool.CrossDomainFallback = true
+	// 裸名首选域默认国内（cn）；显式 cn:/global: 前缀不受影响。
+	c.Pool.PreferredRealm = "cn"
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
@@ -571,6 +586,13 @@ func (c *Config) normalize() error {
 	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
 	if c.Pool.CreditFloor < 0 {
 		c.Pool.CreditFloor = 0
+	}
+	// 裸名首选域：只认 cn/global（大小写不敏感），空值或非法值一律回落 cn（国内优先）。
+	switch strings.ToLower(strings.TrimSpace(c.Pool.PreferredRealm)) {
+	case "global":
+		c.Pool.PreferredRealm = "global"
+	default:
+		c.Pool.PreferredRealm = "cn"
 	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3
