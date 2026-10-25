@@ -30,6 +30,9 @@
 > | **裸名首选域** | 新增 `pool.preferred_realm`（`cn` 默认 / `global`）。只影响不带 `cn:` / `global:` 前缀的请求先试哪个域，显式前缀永不被改写。 |
 > | **跨域回退默认开启** | `pool.cross_domain_fallback` 默认值由 `false` 改为 `true`：首选域选不到可用账号时自动换另一域再选一次。需要严格锁域时显式设为 `false`。 |
 > | **提示词配置提示修正** | `prompt.mode` / `prompt.file` / `prompt.text` 在进程启动时固化，已补进面板的「保存后需重启」清单（此前保存成功却不提示，容易误判为没生效）。 |
+> | **思考档位按实测收敛** | 上游只校验枚举值、不按模型限制档位（两域 336 次直连实测，见下文）。`normalizeReasoningEffort` 改为仅枚举校验（非法值→`high`），`max` 不再被削成 `xhigh`/`high`；`/v1/models` 的 `reasoning_supported_efforts` 统一输出实测全集。 |
+> | **单档模型自动补默认档** | 实测 `glm-5.1` 不带 `reasoning_effort` 会被上游 400 `11133`，带 `medium` 即 200。现对「合法档位恰好一个」的模型自动补档；多档模型不干预，显式关闭思考时不注入。 |
+> | **模型可用性 / 视觉 / 工具全量实测** | 两域 56 个模型逐一真请求验证（含红图颜色 + 两位数图片双重视觉验证、`get_weather` 工具调用）。结论沉淀在「思考档位」章节与 `capability_cn.csv` / `capability_gl.csv`。 |
 >
 > 镜像：`ghcr.io/lxnan888/wb2api-panel:latest`（多架构 amd64/arm64，公开可拉）。
 > 面板「配置 → 模型 ID 与跨域路由」可直接改上面两项，保存即生效，无需重启。
@@ -70,6 +73,10 @@
 > `max` 原样出站；`/v1/models` 的 `reasoning_supported_efforts` 统一输出实测全集
 > `minimal/low/medium/high/xhigh/max`（`off` 两域实测均 400，不列入）。
 > 验证方式：`glm-5.2` 传 `max` 返回 200，日志不再出现 `reasoning_effort downgraded`。
+>
+> 追加（提交 `6ab851f`）：实测发现 `glm-5.1` 这类「只思考」模型**不带** `reasoning_effort`
+> 会被上游 400 `11133`（request parameters were rejected by the model provider），带
+> `medium` 即 200。已对「合法档位恰好一个」的模型自动补默认档；多档模型不干预。
 
 ---
 
