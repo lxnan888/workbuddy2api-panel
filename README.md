@@ -65,9 +65,11 @@
 `max` 返回 200，且同提示词下 thinking tokens 明显高于 `high`（单样本 311 vs 200，仅供参考；
 样本噪声大，要定论需多次采样取中位数）。
 
-> 如果你想保留 `max`：目前需要改代码（`internal/upstream/payload.go` 的
-> `normalizeReasoningEffort`）。建议的收敛方向是「只校验枚举合法性，不再按模型目录降级」，
-> 或加一个开关默认关闭降级、遇 400 再回退重试一次。
+> **本 fork 已按上述结论改完并上线**（提交 `ebf167e`）：
+> `normalizeReasoningEffort` 只做枚举合法性校验（非法值 → `high`），不再按模型目录降级，
+> `max` 原样出站；`/v1/models` 的 `reasoning_supported_efforts` 统一输出实测全集
+> `minimal/low/medium/high/xhigh/max`（`off` 两域实测均 400，不列入）。
+> 验证方式：`glm-5.2` 传 `max` 返回 200，日志不再出现 `reasoning_effort downgraded`。
 
 ---
 
