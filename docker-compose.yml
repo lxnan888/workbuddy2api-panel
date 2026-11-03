@@ -1,6 +1,11 @@
+# 直接使用 GitHub Actions 构建并发布到 GHCR 的镜像：
+#   ghcr.io/lxnan888/wb2api-panel:latest
+# 本地无需 git clone 源码、无需 docker build，首次 `up` 只拉镜像。
+# 更新到最新版：docker compose pull && docker compose up -d
 services:
   wb2api:
-    build: .
+    image: ghcr.io/lxnan888/wb2api-panel:latest
+    # 开发调试想从源码构建时：删掉上面的 image，改用 build: .
     container_name: workbuddy2api
     restart: unless-stopped
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致

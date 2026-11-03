@@ -34,7 +34,8 @@
 > | **单档模型自动补默认档** | 实测 `glm-5.1` 不带 `reasoning_effort` 会被上游 400 `11133`，带 `medium` 即 200。现对「合法档位恰好一个」的模型自动补档；多档模型不干预，显式关闭思考时不注入。 |
 > | **模型可用性 / 视觉 / 工具全量实测** | 两域 56 个模型逐一真请求验证（含红图颜色 + 两位数图片双重视觉验证、`get_weather` 工具调用）。结论沉淀在「思考档位」章节与 `capability_cn.csv` / `capability_gl.csv`。 |
 >
-> 镜像：`ghcr.io/lxnan888/wb2api-panel:latest`（多架构 amd64/arm64，公开可拉）。
+> 镜像：`ghcr.io/lxnan888/wb2api-panel:latest`（GitHub Actions 自动构建，多架构 amd64/arm64，公开可拉）。
+> `docker-compose.yml` 已直接引用该镜像——`git clone` 后 `docker compose up -d` 即可，本地不再构建。
 > 面板「配置 → 模型 ID 与跨域路由」可直接改上面两项，保存即生效，无需重启。
 >
 > 上游原 README 的停维护/合规声明仍然适用，使用前请自行评估风险。
@@ -294,15 +295,16 @@ flowchart LR
 - **Docker + Docker Compose**（服务端部署方式，镜像内已含低权限用户与全部工具脚本）——或
 - **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见下方「Windows 单文件运行」）
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
-- 宿主机 Go ≥ 1.22（仅从源码构建时需要）
+- 宿主机 Go ≥ 1.22（仅方式三 / 本地源码构建时需要；用 GHCR 镜像或 Docker Compose 部署不需要）
 
 ### 方式〇：GHCR 镜像（免克隆免构建）
 
-CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR，`git clone` 之外的部署路径：
+CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR，无需 clone 源码、无需本地构建：
 
 ```bash
 # 1. 准备配置与数据目录
-mkdir -p auths data && cp config.example.json config.json
+mkdir -p auths data
+curl -fsSL https://raw.githubusercontent.com/lxnan888/workbuddy2api-panel/main/config.example.json -o config.json
 #    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
 
 # 2. 拉取并运行
@@ -315,7 +317,7 @@ docker run -d --name workbuddy2api \
 curl -s http://localhost:7863/healthz
 ```
 
-> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `workbuddy2api-panel` →
+> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `wb2api-panel` →
 > Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
 > 本 fork 的 `wb2api-panel` 已是公开包，可直接匿名 `docker pull`。
 >
@@ -324,22 +326,24 @@ curl -s http://localhost:7863/healthz
 
 ### 方式一：Docker Compose（推荐服务器部署）
 
-```bash
-# 1. 克隆
-git clone https://github.com/lxnan888/workbuddy2api-panel.git
-cd workbuddy2api-panel
+compose 直接引用 CI 构建好的 `ghcr.io/lxnan888/wb2api-panel:latest`，**本地不构建**，也不用克隆整个仓库：
 
-# 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
-cp config.example.json config.json
+```bash
+# 1. 建目录，取 compose 与示例配置
+mkdir -p workbuddy2api-panel && cd workbuddy2api-panel
+curl -fsSLO https://raw.githubusercontent.com/lxnan888/workbuddy2api-panel/main/docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/lxnan888/workbuddy2api-panel/main/config.example.json -o config.json
 #    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
 
-# 3. 启动（首次会构建镜像，约 1-2 分钟）
-docker compose up -d --build
+# 2. 启动（直接拉取镜像，不执行 docker build）
+docker compose up -d
 
-# 4. 健康检查（无可用账号时返回 503）
+# 3. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
 # {"healthy":0,"total":0,"service":"workbuddy2api"}
 ```
+
+> 习惯用 git 管理配置也可以先 `git clone` 再 `docker compose up -d`，效果相同——compose 已是纯镜像部署；`raw.githubusercontent.com` 访问不畅时也建议走 `git clone`。
 
 启动后打开 **`http://localhost:7863/panel/`**，用面板「添加账号」完成登录（见下节）。
 
@@ -347,6 +351,7 @@ curl -s http://localhost:7863/healthz
 
 ```bash
 docker compose logs -f          # 跟踪日志
+docker compose pull && docker compose up -d   # 更新到 latest（拉取 CI 新构建的镜像）
 docker compose restart          # 重启
 docker compose down             # 停止并移除容器（数据在 ./auths 与 ./data，不受影响）
 ```
@@ -941,6 +946,15 @@ http://127.0.0.1:7863/panel/
 
 ### Docker 镜像
 
+镜像由 GitHub Actions（`.github/workflows/docker-ghcr.yml`）在推送 `main` / `v*` tag 时自动构建，
+多架构（`amd64` / `arm64`）发布到 GHCR；`docker-compose.yml` 直接引用，**本地无需构建**：
+
+| tag | 来源 |
+|---|---|
+| `ghcr.io/lxnan888/wb2api-panel:latest` | `main` 最新提交（部署默认用这个） |
+| `:main` / `:sha-xxxxxxx` | 同一提交的可追溯 tag（sha 为提交短哈希） |
+| `:1.2.3` / `:1.2` / `:1` | 打 `v*` tag 时发布的语义化版本 |
+
 多阶段镜像（`golang:1.23-alpine` 构建 → `alpine:3.20` 运行）一次编译全部四个二进制并随镜像分发：
 
 - **wb2api**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
@@ -1012,9 +1026,9 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 3. 发布来源与合规边界
 
-- **无预编译 release**：仓库无 Release / tag，产物 = 源码自构建（Dockerfile 多阶段在本地构建时完成）
+- **产物由 CI 构建**：Docker 镜像经 `.github/workflows/docker-ghcr.yml` 在 GitHub Actions 构建并推送 GHCR（`latest` / `main` / `sha-*`，打 `v*` tag 时另有语义化版本）；推送 `v*` tag 时 `.github/workflows/go-binaries.yml` 同时产出五平台二进制 Release
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
-- **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
+- **镜像可追溯**：镜像 tag 带 `sha-xxxxxxx`（提交短哈希），`docker image inspect` 可查 RepoDigests；基础镜像为官方 `golang:1.23-alpine` / `alpine:3.20`，`go.sum` 约束 Go 模块依赖
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 4. 授权使用边界
