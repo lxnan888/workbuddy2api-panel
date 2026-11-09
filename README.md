@@ -33,12 +33,48 @@
 > | **思考档位按实测收敛** | 上游只校验枚举值、不按模型限制档位（两域 336 次直连实测，见下文）。`normalizeReasoningEffort` 改为仅枚举校验（非法值→`high`），`max` 不再被削成 `xhigh`/`high`；`/v1/models` 的 `reasoning_supported_efforts` 统一输出实测全集。 |
 > | **单档模型自动补默认档** | 实测 `glm-5.1` 不带 `reasoning_effort` 会被上游 400 `11133`，带 `medium` 即 200。现对「合法档位恰好一个」的模型自动补档；多档模型不干预，显式关闭思考时不注入。 |
 > | **模型可用性 / 视觉 / 工具全量实测** | 两域 56 个模型逐一真请求验证（含红图颜色 + 两位数图片双重视觉验证、`get_weather` 工具调用）。结论沉淀在「思考档位」章节与 `capability_cn.csv` / `capability_gl.csv`。 |
+> | **限速与燃烧监控移除** | 删除按账号/类别的令牌桶限速与 `credit_burn` 监控（包、配置、状态字段、测试、文档一并移除）。请求不再被网关主动限速；账号健康仍由软冷却、熔断、连败降权控制。 |
+> | **在途改为每账号并发** | 删除 `pool.max_in_flight` / `max_in_flight_global`；国内默认并发 3、国际默认 2，`0` = 按域默认；账号表「并发」列可点击单独设置（1–64），写入 `state.json` 并实时生效；并发满自动换号。 |
+> | **并发等待队列** | 全部账号并发满时等待 `pool.concurrency_wait_timeout`（默认 30s），排队上限 `pool.concurrency_wait_queue`（默认 100）；排队满回 429 `gateway_queue_full`，等待超时回 429 `gateway_concurrency_limit`，完全没号回 503。 |
+> | **配置全量热生效** | 除 `state_file` 外，提示词、超时、UA、上游 base、`max_payload_bytes`、`restriction_hold_seconds`、`listen`、`read_timeout`、`auth_dir`、`upstash`、`session_sticky.*`、日志归档、模型开关、并发等待等保存后立即生效；`listen`/`read_timeout` 进程内重建监听。 |
+> | **请求管线增强** | 出站模型剥 realm 前缀；目录 `max_output_tokens` 补缺省额度；字符串 `stop` 归一化为数组；`prompt.keep_recent_rounds` 历史裁剪；思考档位输出预算下限；工具描述脱敏；`prompt_cache_key` 改为 UUID v4 形态；补会话轮级字段；chat body gzip 与 RPC gzip/deflate/br 解码。 |
+> | **新增协议端点** | 新增 `/v1/embeddings`、`/v1/fetch`、`/v1/search`、`/v1/images/*`、`/v1/videos*`、`/mcp`；`/v1/responses` 与 `/v1/messages` 按需求不实现。 |
+> | **taskjobs 持久化** | 账号后台任务写入 `task-jobs.json`，重启恢复 interrupted 作业；任务中心新增作业列表与启动接口，支持 202 + 轮询。 |
+> | **代理链式拨号修复** | 修复 HTTP(S) 池代理承载明文 HTTP 目标时 `DialContext` 绕过总代理链式拨号的问题。 |
+> | **编译恢复** | 补齐 `internal/server/continue.go`、`internal/upstream/output_budget.go` 等缺失依赖，修复半合并导致的编译失败。 |
+> | **运维能力最终移除** | 本轮曾接线 budget / metrics / admin tasks / admin audit / alerting / watchdog，随后按要求整体删除前后端；余额趋势侧边栏一并移除；仅保留「版本与更新」与 updater。 |
 >
 > 镜像：`ghcr.io/lxnan888/wb2api-panel:latest`（GitHub Actions 自动构建，多架构 amd64/arm64，公开可拉）。
 > `docker-compose.yml` 已直接引用该镜像——`git clone` 后 `docker compose up -d` 即可，本地不再构建。
 > 面板「配置 → 模型 ID 与跨域路由」可直接改上面两项，保存即生效，无需重启。
 >
 > 上游原 README 的停维护/合规声明仍然适用，使用前请自行评估风险。
+
+### 2026-11-09 本轮改动明细（相对上一提交 `f16b662`）
+
+**删除 / 替换**
+- 删除 `internal/ratelimit`、`internal/burn` 及 `rate_limit` / `credit_burn` 配置、状态字段、面板映射、测试与文档。
+- 删除 `pool.max_in_flight` / `pool.max_in_flight_global`；「在途」语义全部替换为「并发」。
+- 最终删除本轮曾接线的 `budget.go`、`metrics_prom.go`、`admin_tasks.go`、`admin_audit.go`、`watchdog.go`、`internal/alert` 及对应配置段、`/metrics`、`/admin/tasks` 路由和面板「运维、预算与告警」区块。
+- 删除面板侧边栏「余额趋势」入口与视图；后端 balance 采样/接口保留但无入口。
+- `/v1/responses`、`/v1/messages`、`/v1/messages/count_tokens` 不实现。
+
+**新增 / 修复**
+- `internal/pool`：每账号并发（国内 3 / 国际 2，`0`=按域默认，1–64），覆盖值持久化到 `state.json`；并发满自动换号；等待队列 30s/100、429/503。
+- `internal/server/handler.go`：并发等待队列、按账号并发获取/释放、`concurrency` / `concurrency_limit` / `concurrency_override` 状态字段；移除主动限速与积分闸。
+- `internal/panel`：账号表「并发」列点击编辑与 `PUT /panel/api/accounts/{uid}/concurrency`；taskjobs 作业列表/启动；版本与更新框。
+- `internal/livecfg` + `internal/upstream/options.go`：提示词、超时、UA、上游 base、`max_payload_bytes`、`restriction_hold_seconds`、global 开关、模型开关等热生效；`listen`/`read_timeout` 进程内重建监听；`auth_dir` 重扫；`upstash` 重连；session sticky / 请求日志热配置。
+- `internal/upstream`：模型裸名、目录 `max_output_tokens`、`normalizeStop`、`trimHistory` + `prompt.keep_recent_rounds`、输出预算下限、`sanitizeTools`、UUID v4 `prompt_cache_key`、会话轮级字段、chat gzip、RPC gzip/deflate/br 解码。
+- `internal/proxypool/transport.go`：修复明文 HTTP 目标绕过总代理链式拨号。
+- 新增 `/v1/embeddings`、`/v1/fetch`、`/v1/search`、`/v1/images/*`、`/v1/videos*`、`/mcp`。
+- `internal/panel/taskjobs.go`：`task-jobs.json` 持久化、重启恢复、202+轮询。
+- `Dockerfile`：`probe_active.py` 路径改为 `tests/scripts/probe_active.py`。
+- `config.example.json`、README、面板配置页同步；删除归属词与过时的「需重启」说明。
+
+**验证与发布**
+- `tests/run.sh go` / `vet` / `race` 全部通过；`tests/smoke.sh` 通过。
+- 真实只读验证：auths 副本 + 临时 state，9 个账号启动、`/v1/models`、单账号并发写入并重启恢复、`listen` 17863→17864 热切换。
+- 本地 `docker build` 通过；`origin/main` 推送后 GHCR 多架构镜像构建成功（最终提交 `98c49c7`）。
 
 ---
 
