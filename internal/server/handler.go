@@ -1548,12 +1548,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			code = "upstream_busy"
 			msg = "upstream capacity is full (queue.full); retry after a short wait"
 		case upstream.ErrModelBlocked:
-			// 11102「该后端无此模型」：上游原文（下方统一透传）已经写清了原因，但
-			// code 此前停在默认的 no_healthy_account —— 那是"服务端过载"的语义，
-			// 客户端据此会不断重试（#81 里就是 503 → 客户端自动重试 5 次），而真正
-			// 该做的是换个模型。用 400 + 明确的 code 把不可重试的性质讲清楚。
-			code = "model_unavailable"
-			status = http.StatusBadRequest
+			// 11102「该后端无此模型」：上游原文（下方统一透传）已经写清了原因。
+			// 全池都对这个模型 11102 时，语义是「这个模型在当前账号池不可用」，
+			// 对齐 sub2api 口径回 404 model_not_found（不可重试，换模型才有效），
+			// 而不是 400/503 让客户端误判成请求参数错或过载。
+			code = "model_not_found"
+			status = http.StatusNotFound
 		}
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
@@ -1570,11 +1570,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 用 400 而非 503：这是"你选的这个模型当前不可用"，不是"服务端暂时过载"。
 	// 换号重试必然同样失败，客户端不该按可重试错误处理。
 	if modelBlock.Blocked {
-		code = "model_unavailable"
-		// 有上游原文时保留它（含 requestId，用户要拿去向上游反馈），只把"有几个号
-		// 被挡、最早何时解封"这类本地调度信息放进 gateway_hint。
-		if !upstreamMsgPassed {
-			msg = "model is unavailable on every account (per-model cooldown), try another model"
+		// 全池模型级阻塞分两类（对齐 sub2api 口径）：
+		//   - 6004 模型级限流：可恢复，回 429 让客户端按限流退避重试；
+		//   - 11102/11158 等「模型不可用」：不可恢复，回 404 model_not_found，
+		//     客户端应换模型而不是重试。
+		if strings.Contains(modelBlock.Reason, "6004") {
+			code = "model_rate_limited"
+			status = http.StatusTooManyRequests
+			if !upstreamMsgPassed {
+				msg = "model is rate-limited on every account (per-model cooldown), please retry later"
+			}
+		} else {
+			code = "model_not_found"
+			status = http.StatusNotFound
+			if !upstreamMsgPassed {
+				msg = "model is not available on any account, try another model"
+			}
 		}
 		hint = fmt.Sprintf("model_blocked: %d account(s) cooling down this model", modelBlock.Count)
 		if !modelBlock.Until.IsZero() {
@@ -1583,7 +1594,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if s := strings.TrimSpace(modelBlock.Reason); s != "" {
 			hint += "; upstream: " + s
 		}
-		status = http.StatusBadRequest
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status

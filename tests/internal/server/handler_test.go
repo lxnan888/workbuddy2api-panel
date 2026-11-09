@@ -926,10 +926,10 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 	}
 }
 
-// TestChatModelForbiddenByAccountTypeReturns400 复现 global:gpt-5.6-sol 在免费账号上
-// 的 11158：网关应仅轮转 global 域、写 (账号,模型) 避让，最终返回明确的 400
-// model_unavailable，而不是被 CN 账号掩盖成 503 no_healthy_account。
-func TestChatModelForbiddenByAccountTypeReturns400(t *testing.T) {
+// TestChatModelForbiddenByAccountTypeReturns404 复现 global:gpt-5.6-sol 在免费账号上
+// 的 11158：网关应仅轮转 global 域、写 (账号,模型) 避让，最终返回 404
+// model_not_found（模型在当前账号池不可用），而不是被 CN 账号掩盖成 503。
+func TestChatModelForbiddenByAccountTypeReturns404(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls++
@@ -944,8 +944,8 @@ func TestChatModelForbiddenByAccountTypeReturns400(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"global:gpt-5.6-sol","messages":[]}`)))
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("code=%d want 400 body=%s", rec.Code, rec.Body)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("code=%d want 404 body=%s", rec.Code, rec.Body)
 	}
 	if calls != 1 {
 		t.Fatalf("calls=%d want 1（只能尝试 global 账号，不能跨域轮转）", calls)
@@ -959,8 +959,8 @@ func TestChatModelForbiddenByAccountTypeReturns400(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("bad response JSON: %v body=%s", err, rec.Body)
 	}
-	if resp.Error.Code != "model_unavailable" {
-		t.Errorf("error.code=%q want model_unavailable", resp.Error.Code)
+	if resp.Error.Code != "model_not_found" {
+		t.Errorf("error.code=%q want model_not_found", resp.Error.Code)
 	}
 	if !strings.Contains(resp.Error.Message, "11158") {
 		t.Errorf("响应应透传上游 11158 原文: %q", resp.Error.Message)

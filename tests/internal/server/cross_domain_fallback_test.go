@@ -54,7 +54,7 @@ func TestBareModelCrossDomainFallbackOnModelBlocked(t *testing.T) {
 	}
 }
 
-// 开关缺省关闭：行为与引入前完全一致——11102 后不跨域，回 400 model_unavailable。
+// 开关缺省关闭：行为与引入前一致——11102 后不跨域，回 404 model_not_found。
 func TestBareModelCrossDomainFallbackDisabledByDefault(t *testing.T) {
 	calls := map[string]int{}
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -73,8 +73,8 @@ func TestBareModelCrossDomainFallbackDisabledByDefault(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"deepseek-v4.1-flash-sg","messages":[{"role":"user","content":"hi"}]}`)))
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "model_unavailable") {
-		t.Fatalf("code=%d body=%s (want 400 model_unavailable)", rec.Code, rec.Body)
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "model_not_found") {
+		t.Fatalf("code=%d body=%s (want 404 model_not_found)", rec.Code, rec.Body)
 	}
 	if calls["Bearer at-gl"] != 0 {
 		t.Errorf("calls=%v want global 0 次（开关关闭不得跨域）", calls)
@@ -98,8 +98,8 @@ func TestExplicitRealmNeverFallsBack(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"cn:deepseek-v4.1-flash-sg","messages":[{"role":"user","content":"hi"}]}`)))
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "model_unavailable") {
-		t.Fatalf("code=%d body=%s (want 400: 显式 cn: 前缀不得回退)", rec.Code, rec.Body)
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "model_not_found") {
+		t.Fatalf("code=%d body=%s (want 404: 显式 cn: 前缀不得回退)", rec.Code, rec.Body)
 	}
 	if calls["Bearer at-gl"] != 0 {
 		t.Errorf("calls=%v want global 0 次（显式前缀零回退）", calls)
