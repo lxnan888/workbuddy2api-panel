@@ -66,10 +66,6 @@ type chatStat struct {
 	cacheMiss int64
 	hasCache  bool
 
-	// budget 积分闸指针：done 时把本次真实扣费与缓存率喂回闸门。
-	// nil = 未接线（测试/裸用场景），跳过记录。
-	budget *dailyBudget
-
 	// 调用来源（客户端 IP / User-Agent）。空 = 未采集（logging.request_client_info
 	// 关闭，或非 chat 路径），展示层一律以 "-" 兜底。
 	clientIP  string
@@ -79,30 +75,21 @@ type chatStat struct {
 }
 
 // newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
-// budget 可选（图片等入口直接挂到积分闸）。
-func newChatStat(now time.Time, body []byte, stream bool, budget ...*dailyBudget) *chatStat {
+func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
 	mode := "sync"
 	if stream {
 		mode = "stream"
 	}
-	st := &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
-	if len(budget) > 0 {
-		st.budget = budget[0]
-	}
-	return st
+	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
 }
 
 // newChatStatModel 以已知模型名构造统计对象（图片/嵌入等非 chat body 入口）。
-func newChatStatModel(now time.Time, model string, stream bool, budget ...*dailyBudget) *chatStat {
+func newChatStatModel(now time.Time, model string, stream bool) *chatStat {
 	mode := "sync"
 	if stream {
 		mode = "stream"
 	}
-	st := &chatStat{start: now, model: model, mode: mode, toks: -1}
-	if len(budget) > 0 {
-		st.budget = budget[0]
-	}
-	return st
+	return &chatStat{start: now, model: model, mode: mode, toks: -1}
 }
 
 // done 幂等落一行表格日志。
@@ -113,9 +100,6 @@ func (s *chatStat) done() {
 	s.logged = true
 	logChatRowEx(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks,
 		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent)
-	// 积分闸入账：只认上游明确给出 usage.credit 的观测；缓存率同理（缺字段不参与判定）。
-	s.budget.add(s.credit, s.hasCredit)
-	s.budget.observeCache(s.cacheHit, s.cacheMiss, s.hasCache)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，

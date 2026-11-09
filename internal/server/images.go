@@ -118,7 +118,7 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 
 	// 记账：与 chat 同一条管道（请求台账归档由 ServeHTTP 的 isChatEntry 接管，
 	// 这里补账号/模型/用量/扣费 → stdout 流水行 + 面板「请求记录」+ 用量与成本账本）。
-	st := &chatStat{start: start, model: bare, mode: imageMode(edit), toks: -1, budget: h.budget}
+	st := &chatStat{start: start, model: bare, mode: imageMode(edit), toks: -1}
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		st.requestID = tr.id
@@ -248,7 +248,7 @@ func (h *Handler) imageGenerate(ctx context.Context, req map[string]any) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	st := newChatStatModel(time.Now(), bare, false, h.budget)
+	st := newChatStatModel(time.Now(), bare, false)
 	if tr, _ := ctx.Value(requestTraceKey{}).(*requestTrace); tr != nil {
 		st.requestID = tr.id
 		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent

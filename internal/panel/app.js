@@ -355,7 +355,7 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', proxies: '代理池', usage: '用量', balance: '余额趋势', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', proxies: '代理池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -366,7 +366,6 @@ function go(v) {
   if (v === 'proxies') loadProxies();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
-  if (v === 'balance') loadBalance();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
@@ -1530,30 +1529,6 @@ const CFG_MAP = {
   keep_recent_rounds: ['prompt', 'keep_recent_rounds'],
   embeddings_enabled: ['features', 'embeddings_enabled'],
   watermark_strip_enabled: ['features', 'watermark_strip_enabled'],
-  budget_daily_credit_limit: ['budget', 'daily_credit_limit'],
-  budget_burst_credit_limit: ['budget', 'burst_credit_limit'],
-  budget_cache_low_rate: ['budget', 'cache_low_rate'],
-  metrics_enabled: ['metrics', 'enabled'],
-  admin_enabled: ['admin', 'enabled'],
-  admin_audit_enabled: ['admin', 'audit_enabled'],
-  admin_audit_file: ['admin', 'audit_file'],
-  update_auto_enabled: ['update', 'auto_enabled'],
-  update_auto_time: ['update', 'auto_time'],
-  alerting_enabled: ['alerting', 'enabled'],
-  alerting_webhook_url: ['alerting', 'webhook_url'],
-  alerting_secret: ['alerting', 'secret'],
-  alerting_interval_seconds: ['alerting', 'interval_seconds'],
-  alerting_timeout_seconds: ['alerting', 'timeout_seconds'],
-  alerting_startup_grace_seconds: ['alerting', 'startup_grace_seconds'],
-  alerting_min_healthy_cn: ['alerting', 'min_healthy_cn'],
-  alerting_min_healthy_global: ['alerting', 'min_healthy_global'],
-  alerting_recover_healthy: ['alerting', 'recover_healthy'],
-  alerting_breaker_threshold: ['alerting', 'breaker_threshold'],
-  alerting_for_ticks: ['alerting', 'for_ticks'],
-  alerting_clear_ticks: ['alerting', 'clear_ticks'],
-  alerting_send_resolve: ['alerting', 'send_resolve'],
-  watchdog_enabled: ['watchdog', 'enabled'],
-  watchdog_interval_seconds: ['watchdog', 'interval_seconds'],
   breaker_threshold: ['pool', 'breaker_threshold'],
   degrade_threshold: ['pool', 'degrade_threshold'], degrade_cooldown: ['pool', 'degrade_cooldown'],
   degrade_cooldown_max: ['pool', 'degrade_cooldown_max'],
@@ -2091,33 +2066,6 @@ async function loadTaskJobs() {
   }
 }
 if ($('btnJobReload')) $('btnJobReload').onclick = loadTaskJobs;
-
-async function loadBalance() {
-  const tb = $('balBody'), note = $('balNote');
-  if (!tb) return;
-  try {
-    const d = await api('balance_history?days=30');
-    const series = d.series || [];
-    if (note) note.textContent = d.updated_at ? '窗口 30 天 · 最近采样 ' + ago(d.updated_at) : '窗口 30 天';
-    if (!series.length) {
-      tb.innerHTML = '<tr><td colspan="6"><div class="empty">还没有余额采样（签到/余额刷新后产生）</div></td></tr>';
-      return;
-    }
-    tb.innerHTML = series.map(s => {
-      const realm = s.realm === 'global' ? '国际版' : s.realm === 'cn' ? '国内版' : '—';
-      const chg = (s.change > 0 ? '+' : '') + (s.change || 0);
-      const last = s.points && s.points.length ? new Date(s.points[s.points.length - 1].t * 1000).toISOString() : '';
-      return '<tr><td class="who"><div class="nm">' + esc(s.name || String(s.uid || '').slice(0, 8)) + '</div><div class="id">' + esc(String(s.uid || '').slice(0, 16)) + '</div></td>' +
-        '<td>' + realm + '</td><td class="num">' + (s.current ?? 0) + '</td>' +
-        '<td class="num" style="color:' + (s.change < 0 ? 'var(--bad)' : 'var(--ok)') + '">' + chg + '</td>' +
-        '<td class="num">' + (s.min ?? 0) + ' / ' + (s.max ?? 0) + '</td>' +
-        '<td class="num">' + ago(last) + '</td></tr>';
-    }).join('');
-  } catch (e) {
-    tb.innerHTML = '<tr><td colspan="6"><div class="state err">' + esc(e.message) + '</div></td></tr>';
-  }
-}
-if ($('btnBalReload')) $('btnBalReload').onclick = loadBalance;
 
 // 全部接受：把该账号未接受的任务一次性报名（幂等，跳过已接受/已领取）。
 $('btnTaskAcceptAll').onclick = async () => {

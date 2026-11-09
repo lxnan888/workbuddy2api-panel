@@ -73,53 +73,11 @@ type Config struct {
 		SoftRateMax string `json:"soft_rate_max"` // "2h"
 	} `json:"cooldown"`
 
-	// Budget 积分闸：当日累计上限 / 5 分钟突发 / 连续低缓存率。0 = 关闭对应闸。
-	Budget struct {
-		DailyCreditLimit float64 `json:"daily_credit_limit"`
-		BurstCreditLimit float64 `json:"burst_credit_limit"`
-		CacheLowRate     float64 `json:"cache_low_rate"`
-	} `json:"budget"`
-
-	// Metrics 是否开放 GET /metrics（仍走 API key 鉴权）。
-	Metrics struct {
-		Enabled bool `json:"enabled"`
-	} `json:"metrics"`
-
-	// Admin 运维端点开关（目前用于 POST /admin/tasks/{name}/run）。
-	Admin struct {
-		Enabled      bool   `json:"enabled"`
-		AuditEnabled bool   `json:"audit_enabled"`
-		AuditFile    string `json:"audit_file"`
-	} `json:"admin"`
-
 	// Update 自动更新（原生 Release）。
 	Update struct {
 		AutoEnabled bool   `json:"auto_enabled"`
 		AutoTime    string `json:"auto_time"`
 	} `json:"update"`
-
-	// Alerting 账号池健康告警 webhook。
-	Alerting struct {
-		Enabled             bool   `json:"enabled"`
-		WebhookURL          string `json:"webhook_url"`
-		Secret              string `json:"secret"`
-		IntervalSeconds     int    `json:"interval_seconds"`
-		TimeoutSeconds      int    `json:"timeout_seconds"`
-		StartupGraceSeconds int    `json:"startup_grace_seconds"`
-		MinHealthyCN        int    `json:"min_healthy_cn"`
-		MinHealthyGlobal    int    `json:"min_healthy_global"`
-		RecoverHealthy      int    `json:"recover_healthy"`
-		BreakerThreshold    int    `json:"breaker_threshold"`
-		ForTicks            int    `json:"for_ticks"`
-		ClearTicks          int    `json:"clear_ticks"`
-		SendResolve         bool   `json:"send_resolve"`
-	} `json:"alerting"`
-
-	// Watchdog 上游目录改版监控。
-	Watchdog struct {
-		Enabled         bool `json:"enabled"`
-		IntervalSeconds int  `json:"interval_seconds"`
-	} `json:"watchdog"`
 
 	Schedule struct {
 		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
@@ -359,13 +317,6 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.ReadTimeout = "300s"
-	c.Server.MaxPayloadBytes = 64 << 20
-	// 积分闸默认全关（0 = 对应闸关闭）；metrics/admin 缺省关闭。
-	c.Budget.DailyCreditLimit = 0
-	c.Budget.BurstCreditLimit = 0
-	c.Budget.CacheLowRate = 0
-	c.Metrics.Enabled = false
-	c.Admin.Enabled = false
 	c.Server.MaxPayloadBytes = 64 << 20
 	c.Panel.PackageDetailLimit = 5
 	c.Logging.RequestArchiveEnabled = true
@@ -620,16 +571,6 @@ func (c *Config) normalize() error {
 	}
 	if c.Server.MaxPayloadBytes < 8<<20 || c.Server.MaxPayloadBytes > 512<<20 {
 		return fmt.Errorf("server.max_payload_bytes: %d 超出允许范围 8–512 MiB", c.Server.MaxPayloadBytes)
-	}
-	// 积分闸参数负值无意义：静默钳 0（= 关闭对应闸），与既有“负值钳 0”风格一致。
-	if c.Budget.DailyCreditLimit < 0 {
-		c.Budget.DailyCreditLimit = 0
-	}
-	if c.Budget.BurstCreditLimit < 0 {
-		c.Budget.BurstCreditLimit = 0
-	}
-	if c.Budget.CacheLowRate < 0 {
-		c.Budget.CacheLowRate = 0
 	}
 	if c.Upstream.RestrictionHoldSeconds < 0 {
 		return fmt.Errorf("upstream.restriction_hold_seconds: 负值 %d 无意义（0 = 关闭全池暂停）", c.Upstream.RestrictionHoldSeconds)

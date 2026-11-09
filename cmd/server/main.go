@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/balance"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
@@ -288,8 +287,6 @@ func main() {
 		MaxPayloadBytes:      cfg.Server.MaxPayloadBytes,
 		RestrictionHold:      time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
 		GlobalEnabled:        cfg.Global.Enabled,
-		MetricsEnabled:       cfg.Metrics.Enabled,
-		AdminEnabled:         cfg.Admin.Enabled,
 		EmbeddingsEnabled:    cfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled: cfg.Features.WatermarkStripEnabled,
 		AllowlistEnabled:     len(livecfg.NormalizeAllowedModels(cfg.Models.Allowed)) > 0,
@@ -403,16 +400,6 @@ func main() {
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
-	// 管理员操作审计（可选）。
-	var auditLog *server.AuditLog
-	if cfg.Admin.Enabled && cfg.Admin.AuditEnabled && cfg.Admin.AuditFile != "" {
-		auditLog, err = server.NewAuditLog(cfg.Admin.AuditFile, cfg.APIKey)
-		if err != nil {
-			log.Fatalf("admin audit: %v", err)
-		}
-		log.Printf("[audit] 管理员操作审计: %s", auditLog.Path())
-	}
-
 	h := server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
@@ -427,14 +414,6 @@ func main() {
 		RequestLog:   requestLog,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
-		// 手动补跑排程与积分闸/运维端点开关。
-		Tasks:            sch,
-		BudgetLimit:      cfg.Budget.DailyCreditLimit,
-		BurstCreditLimit: cfg.Budget.BurstCreditLimit,
-		CacheLowRate:     cfg.Budget.CacheLowRate,
-		MetricsEnabled:   cfg.Metrics.Enabled,
-		AdminEnabled:     cfg.Admin.Enabled,
-		Audit:            auditLog,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -463,34 +442,6 @@ func main() {
 	// 自动更新（原生 Release）。
 	updateMgr.SetRestart(stop)
 	go updateMgr.Run(ctx)
-	// 账号池健康告警（webhook）。
-	var notify func(string)
-	if cfg.Alerting.Enabled {
-		mon := alert.New(alert.Config{
-			Enabled:          true,
-			WebhookURL:       cfg.Alerting.WebhookURL,
-			Secret:           cfg.Alerting.Secret,
-			Interval:         time.Duration(cfg.Alerting.IntervalSeconds) * time.Second,
-			Timeout:          time.Duration(cfg.Alerting.TimeoutSeconds) * time.Second,
-			StartupGrace:     time.Duration(cfg.Alerting.StartupGraceSeconds) * time.Second,
-			MinHealthyCN:     cfg.Alerting.MinHealthyCN,
-			MinHealthyGlobal: cfg.Alerting.MinHealthyGlobal,
-			RecoverHealthy:   cfg.Alerting.RecoverHealthy,
-			BreakerThreshold: cfg.Alerting.BreakerThreshold,
-			ForTicks:         cfg.Alerting.ForTicks,
-			ClearTicks:       cfg.Alerting.ClearTicks,
-			SendResolve:      cfg.Alerting.SendResolve,
-			ServiceName:      server.ServiceName,
-		}, alertSource{pool: p, h: h})
-		go mon.Run(ctx)
-		notify = mon.Notify
-		log.Printf("alerting: webhook on, every %ds", cfg.Alerting.IntervalSeconds)
-	}
-	// 上游目录改版监控（未开启 alerting 时只写日志）。
-	if cfg.Watchdog.Enabled {
-		go h.WatchCatalog(ctx, time.Duration(cfg.Watchdog.IntervalSeconds)*time.Second, notify)
-		log.Printf("watchdog: 上游目录监控开，每 %ds", cfg.Watchdog.IntervalSeconds)
-	}
 	// 代理池健康探测与总代理周期探测；ctx 取消时 Run 退出，Close 由 defer 负责。
 	go proxies.Run(ctx)
 	go sch.Run(ctx)
@@ -659,8 +610,6 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		MaxPayloadBytes:      newCfg.Server.MaxPayloadBytes,
 		RestrictionHold:      time.Duration(newCfg.Upstream.RestrictionHoldSeconds) * time.Second,
 		GlobalEnabled:        newCfg.Global.Enabled,
-		MetricsEnabled:       newCfg.Metrics.Enabled,
-		AdminEnabled:         newCfg.Admin.Enabled,
 		EmbeddingsEnabled:    newCfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,
 		AllowlistEnabled:     len(livecfg.NormalizeAllowedModels(newCfg.Models.Allowed)) > 0,

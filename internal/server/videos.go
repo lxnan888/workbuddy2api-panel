@@ -468,7 +468,7 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 
 	// 记账与出图同一条管道：请求台账由 ServeHTTP 的 isChatEntry 接管，这里补
 	// 账号/模型/用量/扣费（扣费在出片完成时补记，提交本身不扣钱）。
-	st := &chatStat{start: start, model: bare, mode: "video", toks: -1, budget: h.budget}
+	st := &chatStat{start: start, model: bare, mode: "video", toks: -1}
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		st.requestID = tr.id
@@ -930,7 +930,7 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 		writeJSON(w, http.StatusOK, videoTaskPayload(taskID, state, model, h.videoLedger))
 	}
 	start := time.Now()
-	st := &chatStat{start: start, model: "", mode: "video", toks: -1, budget: h.budget}
+	st := &chatStat{start: start, model: "", mode: "video", toks: -1}
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		st.requestID = tr.id

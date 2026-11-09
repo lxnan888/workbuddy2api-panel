@@ -76,18 +76,6 @@ type Config struct {
 	// 且与 pool 的每账号累计器同源，两条口径不会漂移。
 	Usage *usage.Recorder
 
-	// Tasks 定时任务执行器（可选；nil = 未接线，/admin/tasks 返回 503）。
-	Tasks TaskRunner
-
-	// BudgetLimit/BurstCreditLimit/CacheLowRate 积分闸参数（0 = 关闭对应闸）。
-	BudgetLimit      float64
-	BurstCreditLimit float64
-	CacheLowRate     float64
-
-	// MetricsEnabled 是否开放 GET /metrics（仍走 API key 鉴权）。
-	MetricsEnabled bool
-	// AdminEnabled 是否开放 POST /admin/tasks/{name}/run（仍走 API key 鉴权）。
-	AdminEnabled bool
 	// EmbeddingsEnabled /v1/embeddings 实验特性开关。
 	EmbeddingsEnabled bool
 	// WatermarkStripEnabled /v1/images/strip-watermark 实验特性开关。
@@ -111,9 +99,6 @@ type Config struct {
 
 	// RecordContext 是否把会话上下文记入请求事件日志。
 	RecordContext bool
-
-	// Audit 管理员操作审计日志（nil = 不记录）。
-	Audit *AuditLog
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -131,8 +116,6 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		MaxPayloadBytes:  h.cfg.MaxPayloadBytes,
 		RestrictionHold:  h.cfg.RestrictionHold,
 		GlobalEnabled:    h.cfg.GlobalEnabled,
-		MetricsEnabled:   h.cfg.MetricsEnabled,
-		AdminEnabled:     h.cfg.AdminEnabled,
 		EmbeddingsEnabled: h.cfg.EmbeddingsEnabled,
 		WatermarkStripEnabled: h.cfg.WatermarkStripEnabled,
 		RecordContext:     h.cfg.RecordContext,
@@ -245,11 +228,6 @@ type Handler struct {
 	wafIP wafIPGate
 	// restrict 11140 风控连坐保护（restrict.go）：同一窗口内多个账号被限制就全池暂停。
 	restrict restrictionGate
-	// 手动补跑排程的并发保护（admin_tasks.go）。
-	taskMu      sync.Mutex
-	taskRunning map[string]bool
-	// budget 积分闸（budget.go）：当日累计 / 5 分钟突发 / 连续低缓存率。
-	budget *dailyBudget
 	// concurrencyWaiters 当前处于并发等待队列的请求数。
 	concurrencyWaiters atomic.Int64
 	// videoLedger 视频任务归属台账（/v1/videos*）。
@@ -281,11 +259,8 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{
 		cfg:         cfg,
 		mux:         http.NewServeMux(),
-		taskRunning: map[string]bool{},
-		budget:      newDailyBudget(cfg.BudgetLimit),
 		videoLedger: newVideoTaskStore(),
 	}
-	h.budget.setGuards(cfg.BurstCreditLimit, cfg.CacheLowRate)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	// 联网搜索（Anthropic Messages 兼容形态，见 messages.go）。路径刻意不占用
 	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
@@ -316,10 +291,6 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/capacity", h.withAuth(h.capacity))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
-	// 手动补跑排程（admin_tasks.go）与 Prometheus 指标（metrics_prom.go）。
-	// 两者都走 API key 鉴权；是否开放由配置开关在 handler 内判定。
-	h.mux.HandleFunc("POST /admin/tasks/{name}/run", h.withAuth(h.audit("tasks.run", auditPathValue("name"), h.adminTaskRun)))
-	h.mux.HandleFunc("GET /metrics", h.withAuth(h.promMetrics))
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
 	}
@@ -792,11 +763,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &peek)
 
-	// 积分闸：日累计 / 5 分钟突发 / 连续低缓存率任一触发即拒，不再打上游。
-	if h.budget != nil && !h.admitBudget(w) {
-		return
-	}
-
 	// 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本
 	// （见 upstream/dsml.go），修复层用它做严格判定。名单来自「本请求声明的 tools」
 	// 与「会话历史里出现过的工具名」两个来源——实测 tools 声明会在中转环节丢失，
@@ -821,7 +787,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
-	st.budget = h.budget
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，

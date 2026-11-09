@@ -34,9 +34,6 @@ type Snapshot struct {
 	RestrictionHold time.Duration
 	// GlobalEnabled global realm 路由开关。
 	GlobalEnabled bool
-	// MetricsEnabled / AdminEnabled 运维端点开关。
-	MetricsEnabled bool
-	AdminEnabled   bool
 	// EmbeddingsEnabled 实验特性：/v1/embeddings 总开关。
 	EmbeddingsEnabled bool
 	// WatermarkStripEnabled 实验特性：/v1/images/strip-watermark 总开关。

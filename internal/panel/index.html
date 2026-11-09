@@ -626,9 +626,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#usage" data-view="usage">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
         用量</a></li>
-      <li><a href="#balance" data-view="balance">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 12.5 6 8l3 2.5L14 4"/><path d="M10.5 4H14v3.5"/></svg>
-        余额趋势</a></li>
       <li><a href="#packages" data-view="packages">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 5.4 8 2.5l5.8 2.9v5.2L8 13.5l-5.8-2.9z"/><path d="M2.2 5.4 8 8.3l5.8-2.9M8 8.3v5.2"/></svg>
         积分构成</a></li>
@@ -842,20 +839,6 @@ socks5://user:pass@host:port"></textarea></label>
     </section>
 
     <!-- 任务中心 -->
-    <section class="view" id="view-balance" hidden>
-      <div class="box">
-        <header><h3>余额趋势 <span class="hint" id="balNote"></span></h3><span class="grow"></span>
-          <button class="xs" id="btnBalReload">刷新</button></header>
-        <div class="pad">
-          <table class="acc">
-            <thead><tr><th>账号</th><th>域</th><th class="num">当前</th><th class="num">窗口变化</th>
-              <th class="num">最低 / 最高</th><th>最近采样</th></tr></thead>
-            <tbody id="balBody"></tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
     <section class="view" id="view-taskscenter" hidden>
       <div class="box">
         <header><h3>后台作业 <span class="hint" id="jobNote"></span></h3><span class="grow"></span>
@@ -1293,69 +1276,6 @@ socks5://user:pass@host:port"></textarea></label>
             <button class="xs" id="btnUpdateCheck">检查更新</button>
             <button class="xs primary" id="btnUpdateInstall">安装更新</button></header>
           <div class="pad"><div class="hint" id="updStatus">读取中…</div></div>
-        </div>
-
-        <div class="box">
-          <header><h3>运维、预算与告警</h3></header>
-          <div class="pad">
-            <div class="grid3">
-              <label class="fld"><span class="lb">每日积分上限</span>
-                <input name="budget_daily_credit_limit" type="number" min="0" step="0.01" placeholder="0">
-                <span class="hint">0 = 不限；超限 429</span></label>
-              <label class="fld"><span class="lb">5 分钟突发积分</span>
-                <input name="budget_burst_credit_limit" type="number" min="0" step="0.01" placeholder="0">
-                <span class="hint">0 = 关闭</span></label>
-              <label class="fld"><span class="lb">低缓存率阈值（%）</span>
-                <input name="budget_cache_low_rate" type="number" min="0" step="0.1" placeholder="0">
-                <span class="hint">连续 5 轮低于此值冷却 60s；0 = 关闭</span></label>
-            </div>
-            <div class="grid3">
-              <label class="fld"><span class="lb">告警 Webhook</span>
-                <input name="alerting_webhook_url" placeholder="留空 = 不推送"></label>
-              <label class="fld"><span class="lb">告警 Secret</span>
-                <input name="alerting_secret" type="password" placeholder="可选"></label>
-              <label class="fld"><span class="lb">检查间隔（秒）</span>
-                <input name="alerting_interval_seconds" type="number" min="5" placeholder="60"></label>
-            </div>
-            <div class="grid3">
-              <label class="fld"><span class="lb">CN 最低健康数</span>
-                <input name="alerting_min_healthy_cn" type="number" min="0" placeholder="1"></label>
-              <label class="fld"><span class="lb">Global 最低健康数</span>
-                <input name="alerting_min_healthy_global" type="number" min="0" placeholder="0"></label>
-              <label class="fld"><span class="lb">恢复健康数</span>
-                <input name="alerting_recover_healthy" type="number" min="0" placeholder="1"></label>
-            </div>
-            <div class="grid3">
-              <label class="fld"><span class="lb">告警超时（秒）</span>
-                <input name="alerting_timeout_seconds" type="number" min="1" placeholder="10"></label>
-              <label class="fld"><span class="lb">启动宽限（秒）</span>
-                <input name="alerting_startup_grace_seconds" type="number" min="0" placeholder="60"></label>
-              <label class="fld"><span class="lb">熔断阈值</span>
-                <input name="alerting_breaker_threshold" type="number" min="1" placeholder="3"></label>
-            </div>
-            <div class="grid3">
-              <label class="fld"><span class="lb">连续告警 Tick</span>
-                <input name="alerting_for_ticks" type="number" min="1" placeholder="3"></label>
-              <label class="fld"><span class="lb">恢复 Tick</span>
-                <input name="alerting_clear_ticks" type="number" min="1" placeholder="2"></label>
-              <label class="fld"><span class="lb">Watchdog 间隔（秒）</span>
-                <input name="watchdog_interval_seconds" type="number" min="60" placeholder="3600"></label>
-            </div>
-            <div class="grid3">
-              <label class="fld"><span class="lb">自动更新时间</span>
-                <input name="update_auto_time" placeholder="04:00"></label>
-              <label class="fld"><span class="lb">审计日志文件</span>
-                <input name="admin_audit_file" placeholder="留空 = 不写"></label>
-            </div>
-            <div class="switch"><span class="lb">启用告警</span><input type="checkbox" name="alerting_enabled"></div>
-            <div class="switch"><span class="lb">告警恢复通知</span><input type="checkbox" name="alerting_send_resolve"></div>
-            <div class="switch"><span class="lb">启用上游目录 Watchdog</span><input type="checkbox" name="watchdog_enabled"></div>
-            <div class="switch"><span class="lb">自动更新</span><input type="checkbox" name="update_auto_enabled"></div>
-            <div class="switch"><span class="lb">开放 /metrics</span><input type="checkbox" name="metrics_enabled"></div>
-            <div class="switch"><span class="lb">开放 /admin/tasks</span><input type="checkbox" name="admin_enabled"></div>
-            <div class="switch"><span class="lb">管理员操作审计</span><input type="checkbox" name="admin_audit_enabled"></div>
-            <div class="hint" style="margin-top:8px">告警/预算/开关类字段保存后立即生效；审计文件与更新相关配置在装配期读取。</div>
-          </div>
         </div>
 
         <div class="box">
