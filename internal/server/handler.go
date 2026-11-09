@@ -111,6 +111,9 @@ type Config struct {
 
 	// RecordContext 是否把会话上下文记入请求事件日志。
 	RecordContext bool
+
+	// Audit 管理员操作审计日志（nil = 不记录）。
+	Audit *AuditLog
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -315,7 +318,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	// 手动补跑排程（admin_tasks.go）与 Prometheus 指标（metrics_prom.go）。
 	// 两者都走 API key 鉴权；是否开放由配置开关在 handler 内判定。
-	h.mux.HandleFunc("POST /admin/tasks/{name}/run", h.withAuth(h.adminTaskRun))
+	h.mux.HandleFunc("POST /admin/tasks/{name}/run", h.withAuth(h.audit("tasks.run", auditPathValue("name"), h.adminTaskRun)))
 	h.mux.HandleFunc("GET /metrics", h.withAuth(h.promMetrics))
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向

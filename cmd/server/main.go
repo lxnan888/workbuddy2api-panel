@@ -396,6 +396,16 @@ func main() {
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
+	// 管理员操作审计（可选）。
+	var auditLog *server.AuditLog
+	if cfg.Admin.Enabled && cfg.Admin.AuditEnabled && cfg.Admin.AuditFile != "" {
+		auditLog, err = server.NewAuditLog(cfg.Admin.AuditFile, cfg.APIKey)
+		if err != nil {
+			log.Fatalf("admin audit: %v", err)
+		}
+		log.Printf("[audit] 管理员操作审计: %s", auditLog.Path())
+	}
+
 	h := server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
@@ -417,6 +427,7 @@ func main() {
 		CacheLowRate:     cfg.Budget.CacheLowRate,
 		MetricsEnabled:   cfg.Metrics.Enabled,
 		AdminEnabled:     cfg.Admin.Enabled,
+		Audit:            auditLog,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
