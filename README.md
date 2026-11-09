@@ -50,32 +50,6 @@
 >
 > 上游原 README 的停维护/合规声明仍然适用，使用前请自行评估风险。
 
-### 2026-11-09 本轮改动明细（相对上一提交 `f16b662`）
-
-**删除 / 替换**
-- 删除 `internal/ratelimit`、`internal/burn` 及 `rate_limit` / `credit_burn` 配置、状态字段、面板映射、测试与文档。
-- 删除 `pool.max_in_flight` / `pool.max_in_flight_global`；「在途」语义全部替换为「并发」。
-- 最终删除本轮曾接线的 `budget.go`、`metrics_prom.go`、`admin_tasks.go`、`admin_audit.go`、`watchdog.go`、`internal/alert` 及对应配置段、`/metrics`、`/admin/tasks` 路由和面板「运维、预算与告警」区块。
-- 删除面板侧边栏「余额趋势」入口与视图；后端 balance 采样/接口保留但无入口。
-- `/v1/responses`、`/v1/messages`、`/v1/messages/count_tokens` 不实现。
-
-**新增 / 修复**
-- `internal/pool`：每账号并发（国内 3 / 国际 2，`0`=按域默认，1–64），覆盖值持久化到 `state.json`；并发满自动换号；等待队列 30s/100、429/503。
-- `internal/server/handler.go`：并发等待队列、按账号并发获取/释放、`concurrency` / `concurrency_limit` / `concurrency_override` 状态字段；移除主动限速与积分闸。
-- `internal/panel`：账号表「并发」列点击编辑与 `PUT /panel/api/accounts/{uid}/concurrency`；taskjobs 作业列表/启动；版本与更新框。
-- `internal/livecfg` + `internal/upstream/options.go`：提示词、超时、UA、上游 base、`max_payload_bytes`、`restriction_hold_seconds`、global 开关、模型开关等热生效；`listen`/`read_timeout` 进程内重建监听；`auth_dir` 重扫；`upstash` 重连；session sticky / 请求日志热配置。
-- `internal/upstream`：模型裸名、目录 `max_output_tokens`、`normalizeStop`、`trimHistory` + `prompt.keep_recent_rounds`、输出预算下限、`sanitizeTools`、UUID v4 `prompt_cache_key`、会话轮级字段、chat gzip、RPC gzip/deflate/br 解码。
-- `internal/proxypool/transport.go`：修复明文 HTTP 目标绕过总代理链式拨号。
-- 新增 `/v1/embeddings`、`/v1/fetch`、`/v1/search`、`/v1/images/*`、`/v1/videos*`、`/mcp`。
-- `internal/panel/taskjobs.go`：`task-jobs.json` 持久化、重启恢复、202+轮询。
-- `Dockerfile`：`probe_active.py` 路径改为 `tests/scripts/probe_active.py`。
-- `config.example.json`、README、面板配置页同步；删除归属词与过时的「需重启」说明。
-
-**验证与发布**
-- `tests/run.sh go` / `vet` / `race` 全部通过；`tests/smoke.sh` 通过。
-- 真实只读验证：auths 副本 + 临时 state，9 个账号启动、`/v1/models`、单账号并发写入并重启恢复、`listen` 17863→17864 热切换。
-- 本地 `docker build` 通过；`origin/main` 推送后 GHCR 多架构镜像构建成功（最终提交 `98c49c7`）。
-
 ---
 
 ## 思考档位（reasoning_effort）两域实测
