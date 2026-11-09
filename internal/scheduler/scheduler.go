@@ -157,6 +157,17 @@ func (s *Scheduler) SetGrowthHook(fn func()) {
 	s.schedMu.Unlock()
 }
 
+// RunGrowthNow 手动触发一次成长任务队列（供 /admin/tasks/growth/run）。
+// 未挂载回调（panel 未构造）时静默跳过，路由侧仍返回 202。
+func (s *Scheduler) RunGrowthNow() {
+	s.schedMu.Lock()
+	hook := s.cfg.GrowthHook
+	s.schedMu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
 // includeDisabledInTasks 返回保号类任务是否应覆盖禁用账号（配置快照，供循环开头取一次）。
 func (s *Scheduler) includeDisabledInTasks() bool {
 	s.schedMu.Lock()

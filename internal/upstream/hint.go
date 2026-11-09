@@ -144,6 +144,9 @@ func isInvalidImageData(body string) bool {
 		strings.Contains(lower, "replace the image")
 }
 
+// HasCodeMarker 包外判据入口：按 codeMarker 的空白容差在原文里找业务码。
+func HasCodeMarker(body, code string) bool { return codeMarker(strings.ToLower(body), code) }
+
 // codeMarker JSON code 字段命中（`"code":N` / `"code": N` / `"code":"N"` 形态，
 // 与 IsModelBlocked 的 code 判定同容差口径）。lower 须为小写 body。
 func codeMarker(lower, code string) bool {

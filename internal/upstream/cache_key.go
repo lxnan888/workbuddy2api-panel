@@ -11,10 +11,25 @@ package upstream
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
+
+// promptCacheKeyFor 计算应写入的 prompt_cache_key。ok=false 表示客户端已带非空
+// key，调用方必须保留原值。
+func promptCacheKeyFor(obj map[string]any, uid, conversationID string) (string, bool) {
+	if existing, ok := obj["prompt_cache_key"].(string); ok && existing != "" {
+		return "", false
+	}
+	conv := conversationID
+	if v := strField(obj, "conversation_id"); v != "" {
+		conv = v
+	} else if v := strField(obj, "conversationId"); v != "" {
+		conv = v
+	}
+	return buildCacheKey(uid, conv), true
+}
 
 // InjectPromptCacheKey 在已改写的出站 body 上注入 prompt_cache_key 字段。
 //
@@ -44,14 +59,10 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 	if existing, ok := obj["prompt_cache_key"].(string); ok && existing != "" {
 		return body
 	}
-	// 优先级 2：body 里的 conversation_id / conversationId 做会话哈希源。
-	conv := conversationID
-	if v := strField(obj, "conversation_id"); v != "" {
-		conv = v
-	} else if v := strField(obj, "conversationId"); v != "" {
-		conv = v
+	key, ok := promptCacheKeyFor(obj, uid, conversationID)
+	if !ok {
+		return body
 	}
-	key := buildCacheKey(uid, conv)
 	obj["prompt_cache_key"] = key
 	out, err := json.Marshal(obj)
 	if err != nil {
@@ -60,22 +71,18 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 	return out
 }
 
-// buildCacheKey 生成 `wb2a-<uid8>-<convHex>` 格式的稳定 cache key。
+// buildCacheKey 生成 UUID v4 形态的 36 字符稳定 key。
 //
-// uid8 提供账号隔离段；convHex = sha256(uid + conversationID)[:16] 的 hex 提供会话段
-// （同账号同会话稳定、不同会话不同）。会话源为空时 convHex 仍由 uid 单独哈希，
-// 保证跨账号绝不碰撞但同一空会话不复用（空会话 = 新会话语义）。
+// 为什么不再带 `wb2a-<uid8>-` 前缀：那是可判别指纹（项目缩写 + 账号 UID 明文段）。
+// uid 仍参与哈希输入 → 跨账号绝不碰撞；同 (uid, conversation) 恒得同值 → 前缀缓存
+// 槽语义不变；空会话源不复用其他会话的槽。
 func buildCacheKey(uid, conversation string) string {
-	uid8 := uid
-	if len(uid8) > 8 {
-		uid8 = uid8[:8]
-	}
-	if uid8 == "" {
-		uid8 = "-"
-	}
 	sum := sha256.Sum256([]byte(uid + "|" + conversation))
-	convHex := hex.EncodeToString(sum[:16])
-	return "wb2a-" + uid8 + "-" + convHex
+	var u [16]byte
+	copy(u[:], sum[:16])
+	u[6] = (u[6] & 0x0f) | 0x40 // version 4
+	u[8] = (u[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
 }
 
 // strField 从 map 取 string 字段，非 string 或空串返回 ""。

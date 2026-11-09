@@ -92,6 +92,32 @@ func (a *Auth) RefreshTokenValue() string {
 	return a.RefreshToken
 }
 
+// NicknameValue 加锁读取 Nickname（面板改名与账号状态展示并发时避免数据竞争）。
+func (a *Auth) NicknameValue() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Nickname
+}
+
+// UpdateNickname 更新昵称并原子写回 auth 文件；写失败时回滚内存值。
+func (a *Auth) UpdateNickname(name string) error {
+	if a == nil {
+		return fmt.Errorf("nil auth")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	old := a.Nickname
+	a.Nickname = name
+	if err := a.saveLocked(); err != nil {
+		a.Nickname = old
+		return err
+	}
+	return nil
+}
+
 // globalEnabled 全局开关：global realm 是否路由（D5 双保险）。
 // 默认开启（与 config global.enabled 缺省 true 一致）：Realm() 正常按显式 realm/
 // domain 判定 global/cn。显式 SetGlobalEnabled(false)（config "enabled": false）关闭
@@ -234,6 +260,15 @@ func (a *Auth) IsEnterpriseSession() bool {
 	return jwtTokenSource(a.AccessTokenValue()) == "enterprise_switch"
 }
 
+// SupportsPersonalGrowth 报告账号是否支持个人成长体系（签到/成长任务/连登等）。
+// 企业版与企业切换会话在上游均为 403，自动任务不应发起任何请求。
+func (a *Auth) SupportsPersonalGrowth() bool {
+	if a == nil {
+		return false
+	}
+	return !a.IsEnterpriseSession()
+}
+
 // jwtTokenSource 解出 JWT payload 中的 token_source 声明；非 JWT / 解码失败
 // 一律返回 ""（老 token 与非标准形态按无此声明处理，零回归）。先按无填充
 // base64url 解（JWT 标准），失败再试带填充形态（兼容非标准签发方）。
@@ -357,6 +392,11 @@ func Parse(raw []byte) (*Auth, error) {
 func (a *Auth) SaveAtomic() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.saveLocked()
+}
+
+// saveLocked 原子写回的锁内实现；调用方必须已持 a.mu。
+func (a *Auth) saveLocked() error {
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return fmt.Errorf("save refused: empty accessToken (uid=%s)", a.UID)
 	}

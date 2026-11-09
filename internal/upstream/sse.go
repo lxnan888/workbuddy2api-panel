@@ -24,6 +24,32 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
 
+// TruncationFinishReason 上游没有给出正常收尾时（既无 finish_reason 也无
+// data: [DONE] 就 EOF = 断流）如实上报的截断终态取值。
+// OpenAI 协议词表里没有「上游断流」，取 "length" 让客户端明确知道输出残缺。
+const TruncationFinishReason = "length"
+
+// StreamErrorFrame 识别「HTTP 200 流里内嵌的失败帧」，返回 (code, message, ok)。
+// 上游把安全策略拦截等失败塞在 SSE 顶层 {code,msg,displayMsg}，没有 choices/error。
+// 判据只认「没有 choices 且 code>0」的帧，避免正文提到这些词时误伤。
+func StreamErrorFrame(obj map[string]any) (int, string, bool) {
+	if _, has := obj["choices"]; has {
+		return 0, "", false
+	}
+	if _, has := obj["error"]; has {
+		return 0, "", false
+	}
+	code, _ := obj["code"].(float64)
+	if code <= 0 {
+		return 0, "", false
+	}
+	msg, _ := obj["msg"].(string)
+	if msg == "" {
+		msg, _ = obj["displayMsg"].(string)
+	}
+	return int(code), msg, true
+}
+
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
 // tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。

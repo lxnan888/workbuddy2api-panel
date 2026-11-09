@@ -190,9 +190,10 @@ func (r *Recorder) Record(e Event) {
 	if len(r.recent) > recentLimit {
 		r.recent = r.recent[:recentLimit]
 	}
+	archive := r.archive
 	r.mu.Unlock()
-	if r.archive != nil {
-		r.archive.enqueue(e)
+	if archive != nil {
+		archive.enqueue(e)
 	}
 }
 
@@ -216,26 +217,62 @@ func (r *Recorder) Snapshot() Snapshot {
 		s.AvgDurationMs = float64(r.durationSum) / float64(r.completed)
 	}
 	r.mu.Unlock()
-	if r.archive != nil {
-		s.Archive = r.archive.stats()
+	if archive := r.currentArchive(); archive != nil {
+		s.Archive = archive.stats()
 	}
 	return s
 }
 
 // ReadArchive 返回最近的归档事件（按时间倒序）。limit<=0 时回落 200，最大 1000。
 func (r *Recorder) ReadArchive(limit int, filter Filter) ([]Event, error) {
-	if r == nil || r.archive == nil {
+	if r == nil {
 		return nil, nil
 	}
-	return r.archive.read(limit, filter)
+	archive := r.currentArchive()
+	if archive == nil {
+		return nil, nil
+	}
+	return archive.read(limit, filter)
 }
 
-// Close 刷盘并停止后台归档。
-func (r *Recorder) Close() {
-	if r == nil || r.archive == nil {
+// currentArchive 锁内取归档指针，避免与 SetConfig 替换并发读写。
+func (r *Recorder) currentArchive() *archiveWriter {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.archive
+}
+
+// SetConfig 热替换归档配置：旧归档刷盘关闭，新配置立即生效（内存指标保留）。
+func (r *Recorder) SetConfig(cfg Config) {
+	if r == nil {
 		return
 	}
-	r.archive.close()
+	if cfg.FileMaxBytes <= 0 {
+		cfg.FileMaxBytes = defaultFileMax
+	}
+	if cfg.QueueSize <= 0 {
+		cfg.QueueSize = defaultQueue
+	}
+	r.mu.Lock()
+	old := r.archive
+	r.archive = newArchiveWriter(cfg)
+	r.mu.Unlock()
+	if old != nil {
+		old.close()
+	}
+}
+
+// Close 刷盘并停止后台归档（保留指针供 Snapshot/ReadArchive 读取已落盘内容）。
+func (r *Recorder) Close() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	a := r.archive
+	r.mu.Unlock()
+	if a != nil {
+		a.close()
+	}
 }
 
 func round1(v float64) float64 {

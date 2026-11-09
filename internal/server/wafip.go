@@ -1,6 +1,6 @@
 // wafip.go WAF IP 级拦截 fail-fast 状态机（任务书 waf-ip-failfast）。
 //
-// 背景（fork-scan-absorb T-1 / BulidH 实测）：WAF 403 拦的是网关出口 IP 而非
+// 背景（本项目-scan-absorb T-1 / BulidH 实测）：WAF 403 拦的是网关出口 IP 而非
 // 账号——3 个账号 1 秒内全 403。既有 ErrWafBlock 账号级软冷却（wafCooldownBase
 // 起的有界退避）在 IP 级拦截时不够：轮转会把一次客户端请求放大 MaxRotate 倍，
 // 同一出口 IP 继续打上游只会加重风控。
@@ -21,6 +21,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // wafIPWindow IP 级判定滑动窗 + 激活时长：窗内不同账号命中 WAF 403 达阈值即
@@ -37,44 +39,77 @@ const wafIPThreshold = 2
 // wafIPGate WAF IP 级拦截状态机（Handler 内嵌，零值可用）。
 type wafIPGate struct {
 	mu    sync.Mutex
-	hits  map[string]time.Time // uid → 最近一次 WAF 403 时刻（判定窗内，惰性剪枝）
-	until time.Time            // IP 级拦截激活截止；零值 = 未激活
+	hits  map[string]map[string]time.Time // 出口键 → uid → 最近命中时刻
+	until map[string]time.Time            // 出口键 → IP 级拦截截止时间
 }
 
-// noteWaf 记一次某账号的 WAF 403，返回记账后 IP 级拦截是否激活（调用方据此
-// fail-fast 终止轮转，优先于 rotateBackoff 退避）。
-//   - 已激活（now < until）：不续期、不记账（窗口期内不重置——保守自然解除）→ true；
-//   - 未激活：记 hits[uid]=now（同号重复命中覆盖不累计，判定口径是「不同号数」），
-//     剪掉窗外的过期命中；不同 UID 数达 wafIPThreshold → 激活到 now+wafIPWindow
-//     （打一条 WARN 供观测），清空判定窗（解除后需全新命中重新判定，不叠旧账）。
-func (g *wafIPGate) noteWaf(uid string) bool {
+// noteWaf 记录某个实际出口上的某账号 WAF 403，返回该出口是否应 fail-fast。
+// 出口键按 direct/global/proxy:<id> 隔离；同一代理出口上的多个账号命中才会
+// 触发该出口的 IP 级状态，不会把其他代理或直连出口一起判死。
+func (g *wafIPGate) noteWaf(exitKey, uid string) bool {
+	if exitKey == "" {
+		exitKey = "direct"
+	}
 	now := time.Now()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if now.Before(g.until) {
-		return true // 激活期内新命中：不续期（自然解除语义，任务书第 3 条）
+	if g.until != nil && now.Before(g.until[exitKey]) {
+		return true
 	}
 	if g.hits == nil {
-		g.hits = map[string]time.Time{}
+		g.hits = map[string]map[string]time.Time{}
 	}
-	g.hits[uid] = now
-	for u, t := range g.hits {
+	if g.hits[exitKey] == nil {
+		g.hits[exitKey] = map[string]time.Time{}
+	}
+	g.hits[exitKey][uid] = now
+	for u, t := range g.hits[exitKey] {
 		if now.Sub(t) > wafIPWindow {
-			delete(g.hits, u)
+			delete(g.hits[exitKey], u)
 		}
 	}
-	if len(g.hits) >= wafIPThreshold {
-		g.until = now.Add(wafIPWindow)
-		log.Printf("WARN: [server] waf ip-level block: %d accounts hit waf 403 within %s, rotate fail-fast until %s", len(g.hits), wafIPWindow, g.until.Format(time.RFC3339))
-		g.hits = map[string]time.Time{}
+	if len(g.hits[exitKey]) >= wafIPThreshold {
+		if g.until == nil {
+			g.until = map[string]time.Time{}
+		}
+		g.until[exitKey] = now.Add(wafIPWindow)
+		log.Printf("WARN: [server] waf exit block: exit=%s accounts=%d window=%s until=%s", exitKey, len(g.hits[exitKey]), wafIPWindow, g.until[exitKey].Format(time.RFC3339))
+		g.hits[exitKey] = map[string]time.Time{}
 		return true
 	}
 	return false
 }
 
-// active 报告 IP 级拦截是否激活（末端错误文案区分 IP 级/账号级措辞用）。
-func (g *wafIPGate) active() bool {
+// active 报告某个出口是否已进入 fail-fast 状态。
+func (g *wafIPGate) active(exitKey string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return time.Now().Before(g.until)
+	return !g.until[exitKey].IsZero() && time.Now().Before(g.until[exitKey])
+}
+
+func wafExitKey(err *upstream.Error) string {
+	if err == nil || !err.HasRoute {
+		return "direct"
+	}
+	if err.Route.Global {
+		return "global"
+	}
+	if err.Route.Proxied && err.Route.ProxyID != "" {
+		return "proxy:" + err.Route.ProxyID
+	}
+	return "direct"
+}
+
+func (h *Handler) blockWAFExit(err *upstream.Error) {
+	if err == nil || !err.HasRoute || h.cfg.Upstream == nil || h.cfg.Upstream.ProxyPool == nil {
+		return
+	}
+	switch {
+	case !err.Route.Global && !err.Route.Proxied:
+		h.cfg.Upstream.ProxyPool.BlockExit("direct", wafIPWindow)
+	case err.Route.Global:
+		h.cfg.Upstream.ProxyPool.BlockExit("global", wafIPWindow)
+	case err.Route.Proxied && err.Route.ProxyID != "":
+		h.cfg.Upstream.ProxyPool.BlockExit(err.Route.ProxyID, wafIPWindow)
+	}
 }

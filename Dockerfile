@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.23-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 # 防止因为直接使用官方源导致下载失败
 RUN go env -w GOPROXY=https://goproxy.cn,direct && \
     go env GOPROXY && \
@@ -27,7 +27,7 @@ COPY --from=build /out/signin_bin /app/signin_bin
 COPY --from=build /out/login /app/login
 COPY --from=build /out/credit /app/credit
 COPY login.sh signin.sh credit.sh /app/
-COPY scripts/probe_active.py /app/scripts/probe_active.py
+COPY tests/scripts/probe_active.py /app/scripts/probe_active.py
 RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh && chmod 755 /app/login.sh /app/signin.sh /app/credit.sh
 # 镜像不带真实配置：落 example 作为默认（生产由挂载卷 /app/config.json 覆盖）
 COPY config.example.json /app/config.json

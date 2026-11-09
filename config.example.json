@@ -5,7 +5,8 @@
   "state_file": "./data/state.json",
   "dns_servers": [],
   "server": {
-    "read_timeout": "300s"
+    "read_timeout": "300s",
+    "max_payload_bytes": 67108864
   },
   "panel": {
     "package_detail_limit": 5
@@ -14,11 +15,48 @@
     "request_archive_enabled": true,
     "request_retention_days": 7,
     "request_archive_max_mb": 100,
-    "request_client_info": true
+    "request_client_info": true,
+    "request_archive_context": false
   },
   "cooldown": {
     "soft_rate": "600s",
     "soft_rate_max": "2h"
+  },
+  "budget": {
+    "daily_credit_limit": 0,
+    "burst_credit_limit": 0,
+    "cache_low_rate": 0
+  },
+  "metrics": {
+    "enabled": false
+  },
+  "admin": {
+    "enabled": false,
+    "audit_enabled": false,
+    "audit_file": ""
+  },
+  "update": {
+    "auto_enabled": false,
+    "auto_time": "04:00"
+  },
+  "alerting": {
+    "enabled": false,
+    "webhook_url": "",
+    "secret": "",
+    "interval_seconds": 60,
+    "timeout_seconds": 10,
+    "startup_grace_seconds": 60,
+    "min_healthy_cn": 1,
+    "min_healthy_global": 0,
+    "recover_healthy": 1,
+    "breaker_threshold": 3,
+    "for_ticks": 3,
+    "clear_ticks": 2,
+    "send_resolve": true
+  },
+  "watchdog": {
+    "enabled": false,
+    "interval_seconds": 3600
   },
   "schedule": {
     "checkin_hours": [9, 21],
@@ -35,6 +73,8 @@
     "blackcat_enabled": true,
     "balance_refresh_enabled": true,
     "balance_refresh_minutes": 5,
+    "task_sweep_enabled": true,
+    "task_sweep_minutes": 15,
     "include_disabled_in_tasks": false
   },
   "global": {
@@ -55,18 +95,24 @@
     "client_name": "",
     "device_token": "",
     "device_token_file": "",
-    "passthrough_ip": false
+    "passthrough_ip": false,
+    "restriction_hold_seconds": 1800
   },
   "features": {
-    "sanitize_blacklist_fingerprints": true
+    "sanitize_blacklist_fingerprints": true,
+    "embeddings_enabled": false,
+    "watermark_strip_enabled": false
   },
   "models": {
-    "_comment": "hidden: 不对外暴露的模型黑名单。裸名=两域都藏；\"cn:xxx\"/\"global:xxx\"=只藏该域。/v1/models 列表过滤 + chat 点名拒绝，面板保存后热生效。",
-    "hidden": []
+    "_comment": "hidden: 不对外暴露的模型黑名单。裸名=两域都藏；\"cn:xxx\"/\"global:xxx\"=只藏该域。/v1/models 列表过滤 + chat 点名拒绝，面板保存后热生效。allowed: 白名单，空=不启用。",
+    "hidden": [],
+    "allowed": [],
+    "bare_ids": false
   },
   "prompt": {
     "mode": "passthrough",
-    "file": ""
+    "file": "",
+    "keep_recent_rounds": 0
   },
   "upstash": {
     "url": "",
@@ -81,8 +127,8 @@
       "domestic": [],
       "international": []
     },
-    "max_in_flight": 3,
-    "max_in_flight_global": 2,
+    "concurrency_wait_timeout": "30s",
+    "concurrency_wait_queue": 100,
     "breaker_threshold": 3,
     "breaker_cooldown": "30m",
     "breaker_cooldown_max": "6h",
@@ -95,7 +141,8 @@
     "expiring_soon": "168h",
     "cost_explore_interval": "30m",
     "credit_floor": 100,
-    "cross_domain_fallback": false
+    "cross_domain_fallback": false,
+    "preferred_realm": "cn"
   },
   "session_sticky": {
     "enabled": true,

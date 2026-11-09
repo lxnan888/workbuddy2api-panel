@@ -386,7 +386,7 @@ func (p *Pool) AvailableUIDs() []string {
 		if !e.healthy(now) {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if p.concurrencyFull(e) {
 			continue
 		}
 		uids = append(uids, uid)
@@ -407,7 +407,7 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 		if !e.healthyForModel(now, model) {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if p.concurrencyFull(e) {
 			continue
 		}
 		uids = append(uids, uid)
@@ -442,7 +442,7 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 			logfmt.Label(e.a.UID, e.a.Nickname), model, e.credits, p.creditFloor)
 		return nil
 	}
-	if p.inFlightFull(e) {
+	if p.concurrencyFull(e) {
 		return nil
 	}
 	e.lastUsed = now
@@ -464,7 +464,7 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 	if !e.healthy(now) {
 		return nil
 	}
-	if p.inFlightFull(e) {
+	if p.concurrencyFull(e) {
 		return nil
 	}
 	e.lastUsed = now
@@ -473,15 +473,15 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 	return e.a
 }
 
-// CountsDetailed 返回 total/healthy/cooling/disabled/inFlightFull 五类计数。
+// CountsDetailed 返回 total/healthy/cooling/disabled/concurrencyFull 五类计数。
 // cooling 含常规冷却（until）与熔断期（breakerUntil）。
 // 注意：healthy 口径不含 inFlight 维度（是状态机权威判定，只看 disabled/until/breakerUntil）；
-// inFlightFull 是 healthy 的子集——healthy 里已达在途上限的账号数，供 /status 透出满载度。
+// concurrencyFull 是 healthy 的子集——healthy 里已达在途上限的账号数，供 /status 透出满载度。
 // 与 ServableNow 的区别见该函数注释。
 // 保持既有语义：paused 并入 disabled（= /status 的「不可用」口径）。监控/脚本只
 // 关心"还能不能用"，这个口径对它们是稳定契约，不因面板展示需要而改变。
 // 面板概况需要分开计数，用 CountsDetailedWithPaused。
-func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled, inFlightFull int) {
+func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled, concurrencyFull int) {
 	t, h, c, d, pz, f := p.countsDetailedForRealm("")
 	return t, h, c, d + pz, f
 }
@@ -490,13 +490,13 @@ func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled, inFlightFull
 //
 // 面板概况要回答「禁用几个、暂停几个」——暂停只关选号、照常签到保活，与禁用混成
 // 一个数字会让人误判池子的真实状况（issue #125）。
-func (p *Pool) CountsDetailedWithPaused() (total, healthy, cooling, disabled, paused, inFlightFull int) {
+func (p *Pool) CountsDetailedWithPaused() (total, healthy, cooling, disabled, paused, concurrencyFull int) {
 	return p.countsDetailedForRealm("")
 }
 
 // CountsDetailedForRealm 同 CountsDetailed，但仅统计 Realm()==realm 的账号；
 // realm=="" 不加谓词（= CountsDetailed）。供 /status 按域分组透出。
-func (p *Pool) CountsDetailedForRealm(realm string) (total, healthy, cooling, disabled, inFlightFull int) {
+func (p *Pool) CountsDetailedForRealm(realm string) (total, healthy, cooling, disabled, concurrencyFull int) {
 	t, h, c, d, pz, f := p.countsDetailedForRealm(realm)
 	return t, h, c, d + pz, f
 }
@@ -508,7 +508,7 @@ func (p *Pool) CountsDetailedForRealm(realm string) (total, healthy, cooling, di
 // /status 要的是「还能不能用」（暂停与禁用同样不可选，合并）；面板概况要的是
 // 「禁用几个、暂停几个」（分开，issue #125）。两种口径都合理，所以把选择权
 // 留在调用方，而不是让一个共享函数替所有人做决定。
-func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, disabled, paused, inFlightFull int) {
+func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, disabled, paused, concurrencyFull int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
@@ -528,24 +528,113 @@ func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, di
 			cooling++
 		default:
 			healthy++
-			if p.inFlightFull(e) {
-				inFlightFull++
+			if p.concurrencyFull(e) {
+				concurrencyFull++
 			}
 		}
 	}
-	return total, healthy, cooling, disabled, paused, inFlightFull
+	return total, healthy, cooling, disabled, paused, concurrencyFull
+}
+
+// RealmHealth 现算，不另存计数器。
+// Breaker/Degraded 与 Cooling 有交集。ManualDisabled 本面板没有单独标志，恒 0。
+type RealmHealth struct {
+	Total   int
+	Healthy int
+	Cooling int
+	// Disabled 仅统计已禁用；Paused（暂停选号）单列——两者对监控口径不同：
+	// /status 与 /metrics 的「不可用」要合并（d+p）由调用方各自加。
+	Disabled       int
+	Paused         int
+	ConcurrencyFull int
+	Breaker        int
+	Degraded       int
+	ManualDisabled int
+	ModelCooled    int
+	Concurrency    int
+}
+
+// RealmHealth 返回某 realm 的账号健康分布；realm=="" 统计全池。
+func (p *Pool) RealmHealth(realm string) RealmHealth {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	var h RealmHealth
+	for _, e := range p.byUID {
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		h.Total++
+		switch {
+		case e.disabled || e.paused:
+			if e.disabled {
+				h.Disabled++
+			} else {
+				h.Paused++
+			}
+		case !e.healthy(now):
+			h.Cooling++
+		default:
+			h.Healthy++
+			if p.concurrencyFull(e) {
+				h.ConcurrencyFull++
+			}
+		}
+		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {
+			h.Breaker++
+		}
+		if !e.degradeUntil.IsZero() && now.Before(e.degradeUntil) {
+			h.Degraded++
+		}
+		for _, mc := range e.modelCooldowns {
+			if !mc.Until.IsZero() && now.Before(mc.Until) {
+				h.ModelCooled++
+				break
+			}
+		}
+		h.Concurrency += int(e.inFlight.Load())
+	}
+	return h
 }
 
 // ServableNow 报告池当前是否可服务：存在至少一个 healthy 且未占满在途名额的账号。
 // 与 CountsDetailed 的 healthy 口径不同：healthy 只看 disabled/until/breakerUntil（状态机权威判定），
-// 不看 inFlight；ServableNow 额外叠加在途维度，与 chat 的真实可达性（Pick 会跳过 inFlightFull 账号）对齐。
+// 不看 inFlight；ServableNow 额外叠加在途维度，与 chat 的真实可达性（Pick 会跳过 concurrencyFull 账号）对齐。
 // 专供 /healthz 用，避免"全账号 healthy 但都占满"时探活误报 200 而 chat 返回 503 的口径裂缝。
 func (p *Pool) ServableNow() bool {
 	return p.ServableForRealm("")
 }
 
+// HasHealthyForModelRealm 报告某域是否存在对该模型健康、但忽略并发占用的账号。
+// 用于区分「有号但并发全满（应等待）」与「完全没号（应 503）」。
+func (p *Pool) HasHealthyForModelRealm(model, realm string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	for _, e := range p.byUID {
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if e.disabled || e.paused {
+			continue
+		}
+		if model != "" {
+			if !e.healthyForModel(now, model) {
+				continue
+			}
+		} else if !e.healthy(now) {
+			continue
+		}
+		if p.floorBlockedForRealmModel(e, model, realm, now) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // ServableForRealm 报告某 realm 是否可服务：存在至少一个该 realm 的 healthy 且未占满在途名额的账号。
-// 与 ServableNow 同口径（healthy 或模型豁免、排除 inFlightFull），仅叠加 Realm()==realm 谓词。
+// 与 ServableNow 同口径（healthy 或模型豁免、排除 concurrencyFull），仅叠加 Realm()==realm 谓词。
 // realm=="" 退化为 ServableNow（现状语义）。供 /healthz 按 realm 暴露 CN/global 各自可达性。
 func (p *Pool) ServableForRealm(realm string) bool {
 	p.mu.RLock()
@@ -555,7 +644,7 @@ func (p *Pool) ServableForRealm(realm string) bool {
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if p.concurrencyFull(e) {
 			continue
 		}
 		// 存在性语义：账号级 healthy，或处于模型级豁免形态（6004 单模型软冷却——
@@ -566,6 +655,34 @@ func (p *Pool) ServableForRealm(realm string) bool {
 		}
 	}
 	return false
+}
+
+// CapacityForModel 返回指定模型的可服务账号数与全池健康账号数（只读快照）。
+//
+// modelAvailable 与选号口径一致：账号级 healthy + 该模型无模型级冷却 + 未触积分
+// 保底；realm=="" 时不限域，否则只统计 Realm()==realm 的账号。
+// poolAvailable 只按账号级 healthy 统计（不看模型、不看在途）。
+//
+// 刻意不在途过滤：容量查询回答的是「池里有多少号具备服务资格」，请求准入门槛
+// 由聊天路径的 Acquire/在途上限独立决定。若这里按在途扣减，客户端会看到容量
+// 随并发抖动，反而无法用于容量规划。
+func (p *Pool) CapacityForModel(model, realm string) (modelAvailable, poolAvailable int) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	now := time.Now()
+	for _, e := range p.byUID {
+		if e.healthy(now) {
+			poolAvailable++
+		}
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if e.healthyForModel(now, model) && !p.floorBlockedForRealmModel(e, model, realm, now) {
+			modelAvailable++
+		}
+	}
+	return modelAvailable, poolAvailable
 }
 
 // List 返回所有账号状态（按 UID 排序，稳定输出）。
@@ -603,23 +720,25 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 拷贝一份：List 返回后 JSON 序列化在锁外进行，不能与 NoteModelCost 的
 		// 原地扣减共享底层数组（数据竞争）。
 		CreditsExpiryBuckets: append([]ExpiryBucket(nil), e.expiryBuckets...),
-		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil),
-		Disabled:                 e.disabled,
-		Paused:                   e.paused,
-		SuccessCount:             e.successCount,
-		ErrTotal:                 e.errTotal,
-		CheckinDone:              e.lastCheckinDay == now.Format("2006-01-02"),
-		TokenUsage:               e.tokenUsage,
-		LastSuccessTime:          e.lastSuccess,
-		LastErrTime:              e.lastErr,
-		Until:                    e.until,
-		SoftStreak:               e.softStreak,
-		ModelCosts:               p.modelCostsStatusLocked(e, now),
-		ConsecutiveFails:         e.consecutiveFails,
-		DegradeUntil:             e.degradeUntil,
-		InFlight:                 int(e.inFlight.Load()),
-		BreakerFails:             e.fails,
-		BreakerUntil:             e.breakerUntil,
+		Cooling:              now.Before(e.until) || now.Before(e.breakerUntil),
+		Disabled:             e.disabled,
+		Paused:               e.paused,
+		SuccessCount:         e.successCount,
+		ErrTotal:             e.errTotal,
+		CheckinDone:          e.lastCheckinDay == now.Format("2006-01-02"),
+		TokenUsage:           e.tokenUsage,
+		LastSuccessTime:      e.lastSuccess,
+		LastErrTime:          e.lastErr,
+		Until:                e.until,
+		SoftStreak:           e.softStreak,
+		ModelCosts:           p.modelCostsStatusLocked(e, now),
+		ConsecutiveFails:     e.consecutiveFails,
+		DegradeUntil:         e.degradeUntil,
+		Concurrency:          int(e.inFlight.Load()),
+		ConcurrencyLimit:     p.concurrencyLimit(e),
+		ConcurrencyOverride:  e.concurrency,
+		BreakerFails:         e.fails,
+		BreakerUntil:         e.breakerUntil,
 	}
 	// reason 仅在冷却/禁用中透出（issue #171）：软冷却按 until 到期恢复，
 	// 但 until/coolKind/reason 字段按设计不主动清理（NoteSuccess 注释：

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 //go:embed defaultprompt.md
@@ -23,6 +24,10 @@ var defaultPrompt string
 // 判定为指纹误报后换最小中性提示词重试一次。非对抗框架——只用于绕开
 // system 来源的误报，不改变用户指令的合法性语义。
 const Degraded = "You are a helpful assistant. Respond in the user's language, follow the user's instructions, and be direct and concise."
+
+// ChannelFallback 渠道兜底 system：客户端没给 system 时补一条行为约定，
+// 不声明身份，避免与客户端人设冲突。内容拦截降级仍用 Degraded（保持既有语义）。
+const ChannelFallback = "Follow the user's instructions and respond in the user's language."
 
 // Load 按 mode 与 file 加载系统提示词文本。
 //   - file 非空 → 读文件（不存在/读失败返回 error，调用方 fail fast）；
@@ -145,6 +150,52 @@ func Append(body []byte, systemPrompt string) []byte {
 	rewritten = append(rewritten, gw)
 	rewritten = append(rewritten, msgs[insertAt:]...)
 	obj["messages"] = rewritten
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// EnsureSystemFirst 保证 messages 首条是 system：首条已是 system 时零改动；
+// 首条是 developer 时就地归一为 system；否则在最前面补一条行为约定。
+// 只解决通道校验，不做内容拦截降级，也不改写任何既有消息文本。
+func EnsureSystemFirst(body []byte, fallback string) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return body
+	}
+	first, ok := msgs[0].(map[string]any)
+	if !ok {
+		return body
+	}
+	role, _ := first["role"].(string)
+	role = strings.ToLower(strings.TrimSpace(role))
+	if role == "system" {
+		return body
+	}
+	if role == "developer" {
+		first["role"] = "system"
+		out, err := json.Marshal(obj)
+		if err != nil {
+			return body
+		}
+		return out
+	}
+	if fallback == "" {
+		fallback = ChannelFallback
+	}
+	rebuilt := make([]any, 0, len(msgs)+1)
+	rebuilt = append(rebuilt, map[string]any{"role": "system", "content": fallback})
+	rebuilt = append(rebuilt, msgs...)
+	obj["messages"] = rebuilt
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return body

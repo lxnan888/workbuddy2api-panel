@@ -66,6 +66,10 @@ type chatStat struct {
 	cacheMiss int64
 	hasCache  bool
 
+	// budget 积分闸指针：done 时把本次真实扣费与缓存率喂回闸门。
+	// nil = 未接线（测试/裸用场景），跳过记录。
+	budget *dailyBudget
+
 	// 调用来源（客户端 IP / User-Agent）。空 = 未采集（logging.request_client_info
 	// 关闭，或非 chat 路径），展示层一律以 "-" 兜底。
 	clientIP  string
@@ -75,12 +79,30 @@ type chatStat struct {
 }
 
 // newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
-func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
+// budget 可选（图片等入口直接挂到积分闸）。
+func newChatStat(now time.Time, body []byte, stream bool, budget ...*dailyBudget) *chatStat {
 	mode := "sync"
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	st := &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	if len(budget) > 0 {
+		st.budget = budget[0]
+	}
+	return st
+}
+
+// newChatStatModel 以已知模型名构造统计对象（图片/嵌入等非 chat body 入口）。
+func newChatStatModel(now time.Time, model string, stream bool, budget ...*dailyBudget) *chatStat {
+	mode := "sync"
+	if stream {
+		mode = "stream"
+	}
+	st := &chatStat{start: now, model: model, mode: mode, toks: -1}
+	if len(budget) > 0 {
+		st.budget = budget[0]
+	}
+	return st
 }
 
 // done 幂等落一行表格日志。
@@ -91,6 +113,9 @@ func (s *chatStat) done() {
 	s.logged = true
 	logChatRowEx(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks,
 		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent)
+	// 积分闸入账：只认上游明确给出 usage.credit 的观测；缓存率同理（缺字段不参与判定）。
+	s.budget.add(s.credit, s.hasCredit)
+	s.budget.observeCache(s.cacheHit, s.cacheMiss, s.hasCache)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，
@@ -383,6 +408,9 @@ type requestTrace struct {
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
 	userAgent string
+	// context 本轮会话上下文（archiveContext），由 logging.request_archive_context
+	// 决定是否填充；关掉时保持 nil。
+	context json.RawMessage
 }
 
 // captureClientInfo 采集调用来源（客户端 IP + 截断后的 UA）。开关关闭时保持空串：
@@ -659,4 +687,68 @@ func (c *cacheMissSignal) noteCacheTokens(model string, prompt, hit, miss int64)
 	}
 	c.last[model] = now
 	log.Printf("WARN: [server] cache miss: model=%s 本次大前缀未命中（prompt=%d miss=%d，此前观测到过命中）；上游前缀缓存重算，费用会显著升高", model, prompt, miss)
+}
+
+// contextMaxBytes 单个事件上下文上限（丢最旧轮次收敛，不截半个 JSON）。
+const contextMaxBytes = 16 << 10
+
+// archiveContext 从入站请求体抽取会话上下文（system + messages / prompt），
+// 供请求事件日志展开。超限时丢最旧消息，仍超则截断单条 content。
+func archiveContext(body []byte) json.RawMessage {
+	var in struct {
+		System   any   `json:"system"`
+		Messages []any `json:"messages"`
+		Prompt   any   `json:"prompt"`
+	}
+	if json.Unmarshal(body, &in) != nil {
+		return nil
+	}
+	out := map[string]any{}
+	if in.System != nil {
+		out["system"] = in.System
+	}
+	if in.Prompt != nil {
+		out["prompt"] = in.Prompt
+	}
+	for len(in.Messages) > 0 {
+		out["messages"] = in.Messages
+		b, err := json.Marshal(out)
+		if err != nil {
+			return nil
+		}
+		if len(b) <= contextMaxBytes {
+			return b
+		}
+		if len(in.Messages) > 1 {
+			in.Messages = in.Messages[1:]
+			continue
+		}
+		if msg, ok := in.Messages[0].(map[string]any); ok {
+			if s, ok := msg["content"].(string); ok {
+				msg["content"] = logfmt.Truncate(s, contextMaxBytes/2) + "…（超长已截断）"
+				if b, err := json.Marshal(out); err == nil {
+					return b
+				}
+			}
+		}
+		break
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	if len(b) > contextMaxBytes {
+		for _, k := range []string{"system", "prompt"} {
+			if s, ok := out[k].(string); ok {
+				out[k] = logfmt.Truncate(s, contextMaxBytes/2) + "…（超长已截断）"
+			}
+		}
+		if b, err = json.Marshal(out); err != nil {
+			return nil
+		}
+	}
+	return b
 }

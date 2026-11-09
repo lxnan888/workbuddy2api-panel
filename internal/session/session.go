@@ -16,6 +16,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
@@ -49,6 +50,7 @@ type Router struct {
 	entries map[string]entry
 	cfg     Config
 	stop    chan struct{}
+	enabled atomic.Bool
 }
 
 // New 构建路由器。若 cfg.Store 为 nil 则用 Noop（纯内存）；cfg.Available 为 nil 视为空池。
@@ -63,7 +65,39 @@ func New(cfg Config) *Router {
 	if cfg.GCInterval <= 0 {
 		cfg.GCInterval = 5 * time.Minute
 	}
-	return &Router{entries: map[string]entry{}, cfg: cfg}
+	r := &Router{entries: map[string]entry{}, cfg: cfg}
+	r.enabled.Store(true)
+	return r
+}
+
+// Enabled 报告会话粘性是否启用（面板可热改）。
+func (r *Router) Enabled() bool { return r != nil && r.enabled.Load() }
+
+// SetEnabled 热开关会话粘性；关闭后新请求不再读写绑定，已有条目由 GC 自然过期。
+func (r *Router) SetEnabled(v bool) {
+	if r != nil {
+		r.enabled.Store(v)
+	}
+}
+
+// Reconfigure 热更新 TTL/GC 周期并重启 GC 循环。
+func (r *Router) Reconfigure(cfg Config) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if cfg.TTL > 0 {
+		r.cfg.TTL = cfg.TTL
+	}
+	if cfg.GCInterval > 0 {
+		r.cfg.GCInterval = cfg.GCInterval
+	}
+	if cfg.Store != nil {
+		r.cfg.Store = cfg.Store
+	}
+	r.mu.Unlock()
+	r.StopGC()
+	r.StartGC()
 }
 
 // StartGC 启动后台 GC goroutine（幂等）。进程退出时调 StopGC。
@@ -445,10 +479,10 @@ func deriveKey(obj map[string]any) string {
 // 签名，供 deriveKey（粘性键）专用。与 TurnKey 的 contentSignature（全文摘）不同：
 // 文本 part 照常拼接；非文本 part 只入 "[type]" 占位**不入内容摘要**——同一逻辑
 // 图片的 URL 逐轮变化（签名 URL/重编码 base64）是真实场景，内容摘要入键会让
-// 派生键随轮漂移、粘性名存实亡（fork 既有契约：image url changes must not
+// 派生键随轮漂移、粘性名存实亡（本项目 既有契约：image url changes must not
 // break derived key stability）。占位仍能区分"有无图片/图片数量"，纯图片首条
 // 消息（无 text part）由此可派生非空键（首图会话粘性盲区修复，对齐上游 G1
-// 的目标语义而保留 fork 的稳定性口径）。marshal 失败按无内容处理（不伪造）。
+// 的目标语义而保留 本项目 的稳定性口径）。marshal 失败按无内容处理（不伪造）。
 func userContentSignature(content any) string {
 	raw, err := json.Marshal(content)
 	if err != nil {

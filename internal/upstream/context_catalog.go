@@ -10,13 +10,13 @@
 //     （Codex/ZCode/Claude Code 按 context_length 提前截断）白白丢上下文；
 //     max_output_tokens 未知 → 省略字段（输出上限无合估算据，不编造））。
 //
-// 知识表**一处定义、CN/global 两域共用**：context_length 是模型固有属性——fork
+// 知识表**一处定义、CN/global 两域共用**：context_length 是模型固有属性——本项目
 // 706412584 实测结论「两区是同一套 API 的两次部署」，同 id 上下文一致，无按 realm
 // 分表必要（与 effort 档位的 realm 分表刻意不同）。
 //
 // 值来源两类，逐条注释标注：
-//   - fork 实测：706412584 直连上游 /console/enterprises/personal/models 的
-//     maxInputTokens（/tmp/fork_diffs/70_927f57f9.diff，2026-09-13 实测；
+//   - 本项目 实测：706412584 直连上游 /console/enterprises/personal/models 的
+//     maxInputTokens（/tmp/本项目_diffs/70_927f57f9.diff，2026-09-13 实测；
 //     global 侧无法直测、按同 id 外推）；
 //   - models.dev：https://models.dev/ 收录值（2026-09-16 查询，取多 provider 共识值；
 //     官方源如 moonshotai/zai 优先）。未收录或歧义大者不编造。
@@ -35,7 +35,7 @@ type contextCap struct {
 }
 
 // contextCapFallback context_length / max_output_tokens 知识表（CN/global 共用）。
-// 每条注释标注来源：实测 = fork 706412584 直连 CN /console 实测 maxInputTokens
+// 每条注释标注来源：实测 = 本项目 706412584 直连 CN /console 实测 maxInputTokens
 // （global 侧为同 id 外推）；models.dev = 2026-09-16 收录共识值；估算 = 同族外推。
 var contextCapFallback = map[string]contextCap{
 	// ---- GLM 家族（z-ai）----
@@ -75,7 +75,7 @@ var contextCapFallback = map[string]contextCap{
 	"gemini-3.5-flash": {context: 1048576, maxOutput: 65536},  // models.dev 共识
 
 	// ---- global 域路由别名/别名模型 ----
-	"auto": {context: 168000, maxOutput: 0}, // 实测外推（fork global 静态表 168K）；输出上限未知，省略
+	"auto": {context: 168000, maxOutput: 0}, // 实测外推（本项目 global 静态表 168K）；输出上限未知，省略
 }
 
 // ContextWindowListing 模型在 /v1/models 的 context_length（三级查找）：

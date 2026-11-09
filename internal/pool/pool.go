@@ -64,11 +64,9 @@ type Pool struct {
 	// 仅由选号调用方（server handler）读取：开启后，未带 realm 前缀的请求在首选域
 	// 选不到可用号时改用另一域再选一次；显式 cn:/global: 前缀不受影响。
 	crossDomainFallback bool
-	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
-	maxInFlight int
-	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
-	// WAF 风控更紧，压低并发）；0 = 未设置，回落 maxInFlight（不分档，零回归）。
-	maxInFlightGlobal int
+	// defaultConcurrency 未单独覆盖账号的默认并发（测试/兼容用；0 = 按域默认）。
+	// 生产路径不设置：每账号上限 = 覆盖值 > 域默认。
+	defaultConcurrency int
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -261,32 +259,67 @@ func (p *Pool) SetModelRateOf(fn func(realm, model string) string) {
 	p.modelRateOf = fn
 }
 
-// SetMaxInFlight 注入单账号最大在途请求数；0 = 不限。负值保留原值。
-func (p *Pool) SetMaxInFlight(n int) {
+// 每账号并发默认值：国内版 3、国际版 2（国际版 WAF 风控更紧）。
+const (
+	defaultConcurrencyCN     = 3
+	defaultConcurrencyGlobal = 2
+	maxAccountConcurrency    = 64
+)
+
+// SetDefaultConcurrency 设置未单独覆盖账号的默认并发（测试/兼容用；0 = 按域默认）。
+// 生产路径不调用——正常上限由 SetAccountConcurrency 或域默认决定。
+func (p *Pool) SetDefaultConcurrency(n int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if n >= 0 {
-		p.maxInFlight = n
+		p.defaultConcurrency = n
 	}
 }
 
-// SetMaxInFlightGlobal 注入 global 域单账号在途上限（WAF 403 修复 P1-1 分档）；
-// 0 = 未设置，global 账号回落 maxInFlight（不分档）。负值保留原值。
-func (p *Pool) SetMaxInFlightGlobal(n int) {
+// SetAccountConcurrency 设置单账号并发覆盖值；0 = 按域默认，范围 1–64。
+// 返回 false 表示账号不存在。变更立即生效并标记待落盘。
+func (p *Pool) SetAccountConcurrency(uid string, n int) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if n >= 0 {
-		p.maxInFlightGlobal = n
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
 	}
+	if n < 0 {
+		n = 0
+	}
+	if n > maxAccountConcurrency {
+		n = maxAccountConcurrency
+	}
+	e.concurrency = n
+	p.dirty.Store(true)
+	return true
 }
 
-// inFlightLimit 报告账号的生效在途上限（global 分档优先，回落 maxInFlight）；
-// 0 = 不限。调用方需已持 p.mu（或快照过 limit，见 Acquire）。
-func (p *Pool) inFlightLimit(e *entry) int {
-	if p.maxInFlightGlobal > 0 && e.a.Realm() == "global" {
-		return p.maxInFlightGlobal
+// AccountConcurrency 返回账号当前并发占用与上限；ok=false 表示账号不存在。
+func (p *Pool) AccountConcurrency(uid string) (current int64, limit int, ok bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return 0, 0, false
 	}
-	return p.maxInFlight
+	return e.inFlight.Load(), p.concurrencyLimit(e), true
+}
+
+// concurrencyLimit 报告账号的生效并发上限：覆盖值 >0 用它，否则按域默认
+// （国内 3 / 国际 2）。调用方需已持 p.mu（或快照过 limit，见 Acquire）。
+func (p *Pool) concurrencyLimit(e *entry) int {
+	if e.concurrency > 0 {
+		return e.concurrency
+	}
+	if p.defaultConcurrency > 0 {
+		return p.defaultConcurrency
+	}
+	if e.a.Realm() == "global" {
+		return defaultConcurrencyGlobal
+	}
+	return defaultConcurrencyCN
 }
 
 // SetStore 注入池状态快照镜像（redisstore.Store）。nil 表示不镜像（纯本地恢复）。
@@ -300,9 +333,9 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 // RestoreFromSnapshot 择新恢复：比较本地 state.json 与 Redis 快照，采用较新者。
 // 无快照、快照无 savedAt、或本地不存在/不可读时，都会被判定为"本地优先/跳过快照"，
 // 同时打一条恢复来源日志。必须在 SyncToDir 之前调用（SyncToDir 只增删不入值）。
-// Acquire 为 uid 占一个在途名额（会话粘性命中后调用）；池上限内返回 true。
-// 名额用 entry.inFlight 原子自增，满额返回 false。上限按账号 realm 分档
-// （global 档 maxInFlightGlobal，P1-1；未设置回落 maxInFlight）。
+// Acquire 为 uid 占一个并发名额（会话粘性命中后调用）；未满返回 true。
+// 名额用 entry.inFlight 原子自增，满额返回 false。上限按账号覆盖值或域默认
+// （国内 3 / 国际 2）。
 func (p *Pool) Acquire(uid string) bool {
 	p.mu.RLock()
 	e, ok := p.byUID[uid]
@@ -310,13 +343,8 @@ func (p *Pool) Acquire(uid string) bool {
 		p.mu.RUnlock()
 		return false
 	}
-	limit := p.inFlightLimit(e)
+	limit := p.concurrencyLimit(e)
 	p.mu.RUnlock()
-	if limit <= 0 {
-		// 不限：计数仍累加（供状态观测），但永不拒绝。
-		e.inFlight.Add(1)
-		return true
-	}
 	for {
 		cur := e.inFlight.Load()
 		if cur >= int64(limit) {

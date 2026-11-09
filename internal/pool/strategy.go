@@ -161,7 +161,7 @@ func (p *Pool) pickOrderedLocked(cands []*entry, tried map[string]bool, model, r
 		current := p.byUID[cursor.UID]
 		if current != nil && current.a.Realm() == realm && current.healthyForModel(now, model) &&
 			!p.floorBlockedForRealmModel(current, model, realm, now) &&
-			(explored || tried[cursor.UID] || p.inFlightFull(current)) {
+			(explored || tried[cursor.UID] || p.concurrencyFull(current)) {
 			advance = false
 		}
 	}

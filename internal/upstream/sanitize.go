@@ -176,6 +176,30 @@ func sanitizeToolCalls(v any) bool {
 	return changed
 }
 
+// sanitizeTools 净化 tools[].function.description 中的身份句（客户端自带的工具
+// 描述同样会触发上游 11-128；只洗 messages 会漏掉这一整段）。
+func sanitizeTools(v any) {
+	tools, ok := v.([]any)
+	if !ok {
+		return
+	}
+	for _, t := range tools {
+		tm, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := tm["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if d, ok := fn["description"].(string); ok {
+			if s := sanitizeText(d); s != d {
+				fn["description"] = s
+			}
+		}
+	}
+}
+
 // sanitizeMessages 净化 messages 中的 content 与 tool_calls；任一命中返回 true。
 func sanitizeMessages(messages []any) bool {
 	changed := false

@@ -116,7 +116,7 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 			if e.a.Realm() != realm {
 				continue
 			}
-			if e.healthyForModel(now, model) && !p.inFlightFull(e) {
+			if e.healthyForModel(now, model) && !p.concurrencyFull(e) {
 				row.Servable++
 			}
 		}

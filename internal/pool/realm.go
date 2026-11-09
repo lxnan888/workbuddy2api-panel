@@ -24,7 +24,7 @@ func (p *Pool) AvailableUIDsForRealm(realm string) []string {
 		if !e.healthy(now) {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if p.concurrencyFull(e) {
 			continue
 		}
 		uids = append(uids, uid)
@@ -52,7 +52,7 @@ func (p *Pool) ServableForModelRealm(model, realm string) int {
 		if !e.healthyForModel(now, model) {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if p.concurrencyFull(e) {
 			continue
 		}
 		if p.floorBlockedForRealmModel(e, model, realm, now) {
@@ -83,7 +83,7 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 		if !e.healthyForModel(now, model) {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if p.concurrencyFull(e) {
 			continue
 		}
 		uids = append(uids, uid)
@@ -119,7 +119,7 @@ func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 		if !e.healthyForModel(now, model) {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if p.concurrencyFull(e) {
 			continue
 		}
 		uids = append(uids, uid)

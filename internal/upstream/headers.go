@@ -37,16 +37,16 @@ func originRefererFor(a *auth.Auth) string {
 // clientVersion 生效的 WorkBuddy 客户端版本：Client.ClientVersion 非空则取之，
 // 否则内置默认 defaultClientVersion。
 func (c *Client) clientVersion() string {
-	if c != nil && c.ClientVersion != "" {
-		return c.ClientVersion
+	if c != nil && c.Options().ClientVersion != "" {
+		return c.Options().ClientVersion
 	}
 	return defaultClientVersion
 }
 
 // cliVersion 生效的 CLI 版本：Client.CliVersion 非空则取之，否则内置默认 defaultCliVersion。
 func (c *Client) cliVersion() string {
-	if c != nil && c.CliVersion != "" {
-		return c.CliVersion
+	if c != nil && c.Options().CliVersion != "" {
+		return c.Options().CliVersion
 	}
 	return defaultCliVersion
 }
@@ -71,13 +71,52 @@ func (c *Client) defaultWorkBuddyUA() string {
 	return c.defaultWorkBuddyUAFor(nil)
 }
 
+// uaBrandFor 返回该账号所属域的 RPC UA 品牌段：国际版为 workbuddy-ai，国内版为 WorkBuddy。
+func uaBrandFor(a *auth.Auth) string {
+	if a != nil && a.IsGlobal() {
+		return "workbuddy-ai"
+	}
+	return "WorkBuddy"
+}
+
+// rpcUAFor 桌面端 RPC/REST 层出站 UA（不是 chat 的 SDK 形态）：
+// <brand>/<ver> <brand>/<ver> CLI/<cli>。CN 与 chat UA 同值，global 首段为品牌 slug。
+func (c *Client) rpcUAFor(a *auth.Auth) string {
+	if c != nil && c.Options().UserAgent != "" {
+		return c.Options().UserAgent
+	}
+	ver := c.clientVersion()
+	brand := uaBrandFor(a)
+	return brand + "/" + ver + " " + brand + "/" + ver + " CLI/" + c.cliVersion()
+}
+
+// chatHost 返回当前 chat base 的裸主机名（X-Domain 用），解析失败回落
+// www.workbuddy.cn。客户端 X-Domain 恒为主机名，不带 scheme/端口。
+func (c *Client) chatHost(a *auth.Auth) string {
+	return hostOf(c.chatBase(a), "www.workbuddy.cn")
+}
+
+// hostOf 从 base URL 剥出裸主机名（去 scheme 与路径）。
+func hostOf(base, fallback string) string {
+	if i := strings.Index(base, "://"); i >= 0 {
+		base = base[i+3:]
+	}
+	if i := strings.IndexByte(base, '/'); i >= 0 {
+		base = base[:i]
+	}
+	if base == "" {
+		return fallback
+	}
+	return base
+}
+
 // userAgent 返回当前出站 UA（客户端出站路径：chat/refresh/FetchModels）。
 // 优先级：Client.UserAgent（config user_agent）显式覆盖 > 按账号 realm 的默认 WorkBuddy 三段式。
 // 显式覆盖兼容既有覆盖逻辑：用户配了即以用户值为准（自定义品牌/版本），
 // 未配则走官方桌面端默认形态（global 换 `WorkBuddy AI` 平台段）。
 func (c *Client) userAgent(a *auth.Auth) string {
-	if c != nil && c.UserAgent != "" {
-		return c.UserAgent
+	if c != nil && c.Options().UserAgent != "" {
+		return c.Options().UserAgent
 	}
 	return c.defaultWorkBuddyUAFor(a)
 }
@@ -99,11 +138,11 @@ func (c *Client) resolveDeviceToken(a *auth.Auth) string {
 	if a != nil && a.DeviceToken != "" {
 		return a.DeviceToken
 	}
-	if c != nil && c.DeviceToken != "" {
-		return c.DeviceToken
+	if c != nil && c.Options().DeviceToken != "" {
+		return c.Options().DeviceToken
 	}
-	if c != nil && c.DeviceTokenFile != "" {
-		return readDeviceTokenFile(c.DeviceTokenFile)
+	if c != nil && c.Options().DeviceTokenFile != "" {
+		return readDeviceTokenFile(c.Options().DeviceTokenFile)
 	}
 	return ""
 }
@@ -320,8 +359,8 @@ func validTraceID(s string) bool {
 // attributionClientName 生效的用量归属名：ClientName 非空取之；
 // 空默认 "WorkBuddy"（伪造官方桌面端指纹；显式配 "SaaS" 可还原旧行为）。
 func (c *Client) attributionClientName() string {
-	if c != nil && c.ClientName != "" {
-		return c.ClientName
+	if c != nil && c.Options().ClientName != "" {
+		return c.Options().ClientName
 	}
 	return "WorkBuddy"
 }
@@ -348,7 +387,7 @@ func (c *Client) injectAttribution(req *http.Request) {
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游（三等价头）。
 func (c *Client) injectClientIP(req *http.Request, clientIP string) {
-	if c == nil || !c.PassthroughIP || clientIP == "" {
+	if c == nil || !c.Options().PassthroughIP || clientIP == "" {
 		return
 	}
 	req.Header.Set("X-Forwarded-For", clientIP)
@@ -377,7 +416,7 @@ func ExtractClientIP(r *http.Request) string {
 
 // BillingHeaders billing 接口请求头。
 // UA 语义：默认**不设置**（保持现状，Go 客户端自带默认 UA）；仅当显式配置
-// c.UserAgent 非空才覆盖——避免默认路径给 billing 引入新的 UA 指纹。
+// c.Options().UserAgent 非空才覆盖——避免默认路径给 billing 引入新的 UA 指纹。
 func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	// AccessToken 加锁快照（同 ChatHeaders：keepalive 可在 a.mu 内改写）。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
@@ -386,8 +425,8 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	c.injectCodeBuddyRequest(req)
 	// Accept-Language 按 realm 切（D5，billing 域未走 CommonHeaders，单独注入）。
 	req.Header.Set("Accept-Language", acceptLanguageFor(a))
-	if c != nil && c.UserAgent != "" {
-		req.Header.Set("User-Agent", c.UserAgent)
+	if c != nil && c.Options().UserAgent != "" {
+		req.Header.Set("User-Agent", c.Options().UserAgent)
 	} else if ua := c.billingUA(); ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}

@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -28,9 +27,6 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
-
-// messagesBodyLimit Messages 请求体上限：只含 query 与工具声明，1MB 富余。
-const messagesBodyLimit = 1 << 20
 
 // messagesQueryPrefix 辅助搜索模型收到的固定指令前缀（DSH/官方 CLI 的约定）。
 // 它是给模型看的指令，不是搜索词的一部分，必须剥掉后再送去搜索。
@@ -145,8 +141,8 @@ type messagesCitation struct {
 
 // messagesTextBlock 承载 citations 的文本块。
 type messagesTextBlock struct {
-	Type      string            `json:"type"`
-	Text      string            `json:"text"`
+	Type      string             `json:"type"`
+	Text      string             `json:"text"`
 	Citations []messagesCitation `json:"citations,omitempty"`
 }
 
@@ -158,13 +154,13 @@ type messagesUsage struct {
 
 // messagesResponse Anthropic Messages 响应。
 type messagesResponse struct {
-	ID           string `json:"id"`
-	Type         string `json:"type"`
-	Role         string `json:"role"`
-	Model        string `json:"model"`
-	Content      []any  `json:"content"`
-	StopReason   string `json:"stop_reason"`
-	StopSequence any    `json:"stop_sequence"`
+	ID           string        `json:"id"`
+	Type         string        `json:"type"`
+	Role         string        `json:"role"`
+	Model        string        `json:"model"`
+	Content      []any         `json:"content"`
+	StopReason   string        `json:"stop_reason"`
+	StopSequence any           `json:"stop_sequence"`
 	Usage        messagesUsage `json:"usage"`
 }
 
@@ -251,9 +247,11 @@ func writeMessagesError(w http.ResponseWriter, status int, errType, msg string) 
 
 // messages 处理 POST /v1/search/messages（Anthropic Messages 兼容搜索端点）。
 func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, messagesBodyLimit))
-	if err != nil {
-		writeMessagesError(w, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
+	// 搜索同样走统一入站 body 上限（server.max_payload_bytes）：超限 413，
+	// 其余读错误 400；错误形状按 Anthropic 协议返回。
+	raw, berr := h.readBody(w, r)
+	if berr != nil {
+		h.writeBodyError(w, berr, true)
 		return
 	}
 	var req messagesRequest

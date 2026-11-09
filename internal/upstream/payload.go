@@ -8,7 +8,90 @@ import (
 	"encoding/json"
 	"log"
 	"strings"
+	"sync/atomic"
 )
+
+// keepRecentRounds 历史裁剪保留轮数（0 = 关闭）。面板保存后热更新。
+var keepRecentRounds atomic.Int64
+
+// SetKeepRecentRounds 热更新历史裁剪轮数（0 = 不裁剪）。
+func SetKeepRecentRounds(n int) {
+	if n < 0 {
+		n = 0
+	}
+	keepRecentRounds.Store(int64(n))
+}
+
+// normalizeModelName 把出站 model 剥成裸名（realm 前缀是网关侧路由协议）。
+func normalizeModelName(obj map[string]any) {
+	cur, ok := obj["model"].(string)
+	if !ok {
+		return
+	}
+	if _, bare := SplitRealmPrefix(cur); bare != cur {
+		obj["model"] = bare
+	}
+}
+
+// trimHistory 只保留最近 keep 轮对话（一轮 = 一条 user 消息及其后的回复）。
+// system 消息一条不删（cut 之前的 system 提前保留）。
+func trimHistory(obj map[string]any, keep int) {
+	if keep <= 0 {
+		return
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		return
+	}
+	users := make([]int, 0, 8)
+	for i, m := range msgs {
+		if mm, ok := m.(map[string]any); ok && mm["role"] == "user" {
+			users = append(users, i)
+		}
+	}
+	if len(users) <= keep {
+		return
+	}
+	cut := users[len(users)-keep]
+	kept := make([]any, 0, len(msgs)-cut+4)
+	for _, m := range msgs[:cut] {
+		if mm, ok := m.(map[string]any); ok && mm["role"] == "system" {
+			kept = append(kept, m)
+		}
+	}
+	obj["messages"] = append(kept, msgs[cut:]...)
+}
+
+// normalizeStop 把字符串 stop 转成单元素数组（上游只认 []string）。
+func normalizeStop(obj map[string]any) {
+	s, ok := obj["stop"].(string)
+	if !ok {
+		return
+	}
+	obj["stop"] = []string{s}
+}
+
+// injectCatalogMaxTokens 客户端未显式给输出额度时按目录 max_output_tokens 补齐。
+func injectCatalogMaxTokens(obj map[string]any) {
+	if _, ok := explicitOutputBudget(obj); ok {
+		return
+	}
+	model, _ := obj["model"].(string)
+	if cap := modelMaxOutput(model); cap > 0 {
+		obj["max_tokens"] = cap
+	}
+}
+
+// modelMaxOutput 查目录的 max_output_tokens（静态兜底表优先，其次 model.json 缓存）。
+func modelMaxOutput(model string) int64 {
+	if cap, ok := contextCapFallback[model]; ok && cap.maxOutput > 0 {
+		return cap.maxOutput
+	}
+	if e, ok := modelCatalogGet(model); ok && e.MaxOutputTokens > 0 {
+		return e.MaxOutputTokens
+	}
+	return 0
+}
 
 // PrepareBodyOpt 单 pass 改写；sanitize=false 时行为完全还原（仅强制 stream + 归一化 tool_choice）。
 func PrepareBodyOpt(src []byte, sanitize bool) []byte {
@@ -35,6 +118,8 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	if err := json.Unmarshal(src, &obj); err != nil {
 		return src
 	}
+	// 先剥 realm 前缀：后续目录 max_tokens / 档位查表都按裸模型名。
+	normalizeModelName(obj)
 	obj["stream"] = true
 	// max_completion_tokens → max_tokens 翻译（吸收上游 PR #116，Closes #117）：
 	// OpenAI 规范里 max_tokens 已 deprecated、max_completion_tokens 是新字段；
@@ -43,6 +128,8 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	// （实测 32000），长流任务被截。
 	translateMaxCompletionTokens(obj)
 	clampGPTMinMaxTokens(obj)
+	// 目录 max_output_tokens 补缺省输出上限（客户端不带额度时避免被 32000 截断）。
+	injectCatalogMaxTokens(obj)
 	// stream_options 仅当 body 未显式带时补 {include_usage: true}（D7）：
 	// 官方 CLI 流式必发该字段，上游据此在末帧返回 usage 用量；显式带则不覆盖。
 	if _, has := obj["stream_options"]; !has {
@@ -52,7 +139,10 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	normalizeToolPatterns(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
+	normalizeStop(obj)
 	dropReasoningContentParts(obj)
+	// 历史裁剪：只保留最近 keep 轮（用户可配 prompt.keep_recent_rounds）。
+	trimHistory(obj, int(keepRecentRounds.Load()))
 	// tool 配对三步（见 tool_pairing.go）：先合并再重排再清理。所有模型一律执行（独立于
 	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
 	// tool_calls/tool 结果会让上游对之后每条消息都返 400，必须先行剔除；
@@ -80,6 +170,9 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	// 带上默认档即 200。仅当客户端没写、且没显式关思考时补。
 	ensureDefaultEffort(obj, modelName, efforts)
 	normalizeReasoningEffort(obj)
+	// 输出预算下限：思考档位较高而客户端 max_tokens 过小时抬到该档下限。
+	effort, _ := obj["reasoning_effort"].(string)
+	ensureMinOutputBudget(obj, effort, nil)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)
@@ -87,6 +180,7 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs)
 		}
+		sanitizeTools(obj["tools"])
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {

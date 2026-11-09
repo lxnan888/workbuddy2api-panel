@@ -125,10 +125,13 @@ type Status struct {
 	// 误以为"没记录"，实际是零值被 omitempty 省略）。
 	ConsecutiveFails int       `json:"consecutive_fails"`
 	DegradeUntil     time.Time `json:"degrade_until,omitempty"` // 连败降权截止（非零且未过 = 降权中）
-	// 运行态（不持久化）：在途请求数 + 熔断器状态。
-	InFlight     int       `json:"in_flight"`
-	BreakerFails int       `json:"breaker_fails"`
-	BreakerUntil time.Time `json:"breaker_until,omitempty"`
+	// 运行态（不持久化）：当前并发数 + 熔断器状态。
+	Concurrency      int       `json:"concurrency"`
+	ConcurrencyLimit int       `json:"concurrency_limit"`
+	// ConcurrencyOverride 面板设置的覆盖值；0 = 按域默认（不输出零值）。
+	ConcurrencyOverride int       `json:"concurrency_override,omitempty"`
+	BreakerFails     int       `json:"breaker_fails"`
+	BreakerUntil     time.Time `json:"breaker_until,omitempty"`
 }
 
 // ModelCostStatus 单个 (账号, 模型) 的成本台账行（P1-anti-monopoly 可观测性）。
@@ -244,6 +247,10 @@ type entry struct {
 	// 单 until 字段做不到的）。仅 6004 触发时记录；空 map = 无模型级限流（不豁免）。
 	// 运行态语义（不持久化）：重启清零，退化为仅账号级 until 冷却的现状。
 	modelCooldowns map[string]modelCooldown
+	// modelOff 手动关闭的 (账号, 模型) 组合（稀疏，仅存被关闭项）。
+	// 与 modelCooldowns 的区别：后者由上游触发、到期自动清除；本表是运维显式意图，
+	// 永久保留，只有手动解除才会移除。持久化在 stateAccount.ModelOff。
+	modelOff map[string]modelOff
 	// sessionDeadFails 连续 12153（ErrSessionDead）计数。12153 在真实环境会被临时性触发
 	// （网络抖动/上游闪断/refresh 竞态），一次失败就永久禁用太粗暴——连续达到阈值才判死。
 	// 持久化（stateAccount.SessionDeadFails）：上游持续 session dead 时重启归零会导致
@@ -268,8 +275,10 @@ type entry struct {
 	// 持久化（stateAccount.ModelCosts，P1-anti-monopoly）：重启后成本知识保留；
 	// 落盘/恢复按 modelCostTTL 惰性过滤，陈旧观测不复活。
 	modelCost map[string]modelCostEntry
-	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
+	// inFlight 单账号当前并发数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
+	// concurrency 单账号并发覆盖值；0 = 按域默认（国内 3 / 国际 2），持久化到 state.json。
+	concurrency int
 }
 
 // modelCostOf 返回该账号在指定 model 上的有效成本观测；无观测或观测过期返回 ok=false。
@@ -435,6 +444,8 @@ func (e *entry) fallbackKind(now time.Time) string {
 type stateAccount struct {
 	Credits      int64     `json:"credits"`
 	CreditsTotal int64     `json:"credits_total,omitempty"`
+	// Concurrency 单账号并发覆盖值；0 = 按域默认（国内 3 / 国际 2）。
+	Concurrency int       `json:"concurrency,omitempty"`
 	Disabled     bool      `json:"disabled"`
 	Paused       bool      `json:"paused,omitempty"`
 	Reason       string    `json:"reason,omitempty"`

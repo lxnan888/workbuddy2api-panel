@@ -14,24 +14,29 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/balance"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/proxypool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/updater"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
-// appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
+// appVersion 网关版本（本项目 版：面板 + 任务体系），透出到 /panel/api/overview。
 const appVersion = "1.13.0-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
@@ -96,8 +101,6 @@ func main() {
 	// 熔断器 + 在途上限（含 global 分档）+ 连败降权 + 闲置补偿调优（从 config 注入，
 	// 非正值回退默认）。
 	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
-	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
-	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域 WAF 风控分档（P1-1）
 	p.SetDegrade(cfg.Pool.DegradeThreshold, cfg.DegradeCooldownDur, cfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)                 // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
@@ -107,25 +110,42 @@ func main() {
 	p.SetCrossDomainFallback(cfg.Pool.CrossDomainFallback) // 裸名跨域回退（issue #135，默认关闭）
 	_ = p.SetScheduling(cfg.Pool.Strategy, cfg.Pool.AccountOrder)
 
-	// 会话粘性路由（可配关闭）。
+	// 会话粘性路由（常驻创建，enabled 由面板热开关控制）。
 	var sessRouter *session.Router
 	redisMode := "noop"
 	if _, ok := store.(redisstore.Noop); !ok {
 		redisMode = "upstash"
 	}
+	sessRouter = session.New(session.Config{
+		TTL:        cfg.SessionTTL,
+		GCInterval: cfg.SessionGCInterval,
+		Store:      store,
+		Available:  p.AvailableUIDs,
+		// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏）；
+		// 裸名走 cn（现状零回归）。闭包内部 resolveModel 剥前缀，再按 realm 过滤。
+		AvailableForModel: realmAwareAvailableForModel(p),
+	})
+	sessRouter.SetEnabled(cfg.SessionSticky.Enabled)
 	if cfg.SessionSticky.Enabled {
-		sessRouter = session.New(session.Config{
-			TTL:        cfg.SessionTTL,
-			GCInterval: cfg.SessionGCInterval,
-			Store:      store,
-			Available:  p.AvailableUIDs,
-			// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏）；
-			// 裸名走 cn（现状零回归）。闭包内部 resolveModel 剥前缀，再按 realm 过滤。
-			AvailableForModel: realmAwareAvailableForModel(p),
-		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
-		sessRouter.StartGC()
-		defer sessRouter.StopGC()
+	}
+	sessRouter.StartGC()
+	defer sessRouter.StopGC()
+
+	// Upstash 热重连：配置变化时重建 store（连接失败自动降级 Noop）。
+	var upstashMu sync.Mutex
+	upstashURL, upstashToken := cfg.Upstash.URL, cfg.Upstash.Token
+	reloadStore := func(url, token string) {
+		upstashMu.Lock()
+		defer upstashMu.Unlock()
+		if url == upstashURL && token == upstashToken {
+			return
+		}
+		newStore := redisstore.New(url, token)
+		p.SetStore(newStore)
+		sessRouter.Reconfigure(session.Config{Store: newStore})
+		sessRouter.LoadFromStore()
+		upstashURL, upstashToken = url, token
 	}
 	sessCount := func() int {
 		if sessRouter != nil {
@@ -168,6 +188,7 @@ func main() {
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	applyCNChatBase(up, cfg)
+	up.SetOptions(upstreamOptionsFrom(up.Options(), cfg))
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
 	// DNS：Android 没有 /etc/resolv.conf，Go 的纯 Go 解析器会退回 127.0.0.1/::1，
 	// 于是查任何域名都变成"连本机 53 端口"（dial tcp: lookup copilot.tencent.com
@@ -262,6 +283,18 @@ func main() {
 		HiddenModels:         livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
 		BareModelIDs:         cfg.Models.BareIDs,
 		PreferredRealm:       cfg.Pool.PreferredRealm,
+		PromptMode:           cfg.Prompt.Mode,
+		PromptText:           cfg.PromptText,
+		MaxPayloadBytes:      cfg.Server.MaxPayloadBytes,
+		RestrictionHold:      time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
+		GlobalEnabled:        cfg.Global.Enabled,
+		MetricsEnabled:       cfg.Metrics.Enabled,
+		AdminEnabled:         cfg.Admin.Enabled,
+		EmbeddingsEnabled:    cfg.Features.EmbeddingsEnabled,
+		WatermarkStripEnabled: cfg.Features.WatermarkStripEnabled,
+		AllowlistEnabled:     len(livecfg.NormalizeAllowedModels(cfg.Models.Allowed)) > 0,
+		AllowedModels:        livecfg.NormalizeAllowedModels(cfg.Models.Allowed),
+		RecordContext:        cfg.Logging.RequestArchiveContext,
 	})
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
@@ -292,22 +325,55 @@ func main() {
 	// 旅行 / 保活 / 面板手动刷新全覆盖——上游只在少数渠道落金额日志，比对余额
 	// 是唯一可靠的口径。与 state/usage/request-logs 同目录，随 state_file 搬移。
 	creditHist := credithist.New(stateSibling(cfg.StateFile, "credit-history.json"), 2000)
-	up.SetCreditObserver(creditHist.Observe)
+	bal := balance.New(stateSibling(cfg.StateFile, "balance-history.json"))
+	bal.Start()
+	defer bal.Stop()
+	// 余额观察者只做积分历史与趋势采样，不改变出站字节，失败也不影响请求。
+	up.SetCreditObserver(func(uid string, credits int64) {
+		creditHist.Observe(uid, credits)
+		bal.Add(uid, credits)
+	})
 	log.Printf("[credithist] 积分历史已启用: %s", stateSibling(cfg.StateFile, "credit-history.json"))
 
-	pn := panel.New(panel.Config{
+	// 出站代理池：代理节点、账号/realm 绑定、总代理与健康状态都在这里。
+	// 文件与 state.json 同目录，首次为空池 = 直连，不改变既有行为。
+	proxyBase, _ := up.HTTP.Transport.(*http.Transport)
+	proxies, err := proxypool.New(
+		stateSibling(cfg.StateFile, "proxy-pool.json"),
+		proxyBase,
+		upstream.NewDNSDialer(cfg.DNSServers),
+	)
+	if err != nil {
+		log.Fatalf("proxy pool: %v", err)
+	}
+	defer proxies.Close()
+	// 经代理的 HTTPS 与直连共用同一套 ClientHello 指纹和请求头顺序。
+	proxies.SetTLSOver(up.TLSOver)
+	up.ProxyPool = proxies
+
+	// 历史裁剪轮数（0 = 不裁剪）。
+	upstream.SetKeepRecentRounds(cfg.Prompt.KeepRecentRounds)
+
+	// 监听器 supervisor：listen / read_timeout 保存后进程内热切换（state_file 除外）。
+	srvRunner := &serverRunner{}
+
+	// pn 先声明后赋值：SaveConfig 闭包需要引用，panel.New 构造期间尚不可用。
+	var pn *panel.Panel
+	pn = panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
 		RequestLog:  requestLog,
 		Upstream:    up,
 		Scheduler:   sch,
+		ProxyPool:   proxies,
+		AutoTasksEnabled: func() bool { return cfg.Schedule.GrowthEnabled },
 		AuthDir:     cfg.AuthDir,
 		APIKey:      cfg.APIKey,
 		RedisMode:   redisMode,
 		StickyCount: sessCount,
 		Version:     appVersion,
 		Live:        live,
-		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
+		// 模型上限探测数据（tests/scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
 		ConfigPath: *cfgPath,
@@ -315,10 +381,11 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			return saveConfig(raw, *cfgPath, live, p, up, sch, sessRouter, requestLog, srvRunner, pn, reloadStore)
 		},
 		// 积分历史账本（只读展示；写入由上面的余额观察者完成）。
 		CreditHistory: creditHist,
+		Balance:       bal,
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
@@ -343,6 +410,13 @@ func main() {
 		RequestLog:   requestLog,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
+		// 手动补跑排程与积分闸/运维端点开关。
+		Tasks:            sch,
+		BudgetLimit:      cfg.Budget.DailyCreditLimit,
+		BurstCreditLimit: cfg.Budget.BurstCreditLimit,
+		CacheLowRate:     cfg.Budget.CacheLowRate,
+		MetricsEnabled:   cfg.Metrics.Enabled,
+		AdminEnabled:     cfg.Admin.Enabled,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -351,10 +425,60 @@ func main() {
 		// 模型黑名单原始条目；运行期以 livecfg 快照为准（热生效），此处供
 		// Live 为 nil 的裸用/测试路径。
 		ModelsHidden: cfg.Models.Hidden,
+		// 入站请求体上限与 11140 风控连坐暂停均为启动项（热改需重启）。
+		MaxPayloadBytes: cfg.Server.MaxPayloadBytes,
+		RestrictionHold: time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
+		// 并发满等待参数（默认 30s / 100）。
+		ConcurrencyWaitTimeout: cfg.ConcurrencyWaitTimeoutDur,
+		ConcurrencyWaitQueue:   cfg.Pool.ConcurrencyWaitQueue,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 后台任务作业：状态与 state 同目录，重启恢复未完成作业。
+	if err := pn.StartTaskJobs(ctx, stateSibling(cfg.StateFile, "task-jobs.json")); err != nil {
+		p.Flush()
+		log.Fatalf("task jobs: %v", err)
+	}
+	defer pn.StopTaskJobs()
+	pn.ResumeTaskJobs()
+	// 自动更新（原生 Release）。
+	updateMgr := updater.New(appVersion, "linguo2625469/workbuddy2api-panel", *cfgPath, updater.Settings{
+		AutoEnabled: cfg.Update.AutoEnabled,
+		AutoTime:    cfg.Update.AutoTime,
+	})
+	updateMgr.SetRestart(stop)
+	go updateMgr.Run(ctx)
+	// 账号池健康告警（webhook）。
+	var notify func(string)
+	if cfg.Alerting.Enabled {
+		mon := alert.New(alert.Config{
+			Enabled:          true,
+			WebhookURL:       cfg.Alerting.WebhookURL,
+			Secret:           cfg.Alerting.Secret,
+			Interval:         time.Duration(cfg.Alerting.IntervalSeconds) * time.Second,
+			Timeout:          time.Duration(cfg.Alerting.TimeoutSeconds) * time.Second,
+			StartupGrace:     time.Duration(cfg.Alerting.StartupGraceSeconds) * time.Second,
+			MinHealthyCN:     cfg.Alerting.MinHealthyCN,
+			MinHealthyGlobal: cfg.Alerting.MinHealthyGlobal,
+			RecoverHealthy:   cfg.Alerting.RecoverHealthy,
+			BreakerThreshold: cfg.Alerting.BreakerThreshold,
+			ForTicks:         cfg.Alerting.ForTicks,
+			ClearTicks:       cfg.Alerting.ClearTicks,
+			SendResolve:      cfg.Alerting.SendResolve,
+			ServiceName:      server.ServiceName,
+		}, alertSource{pool: p, h: h})
+		go mon.Run(ctx)
+		notify = mon.Notify
+		log.Printf("alerting: webhook on, every %ds", cfg.Alerting.IntervalSeconds)
+	}
+	// 上游目录改版监控（未开启 alerting 时只写日志）。
+	if cfg.Watchdog.Enabled {
+		go h.WatchCatalog(ctx, time.Duration(cfg.Watchdog.IntervalSeconds)*time.Second, notify)
+		log.Printf("watchdog: 上游目录监控开，每 %ds", cfg.Watchdog.IntervalSeconds)
+	}
+	// 代理池健康探测与总代理周期探测；ctx 取消时 Run 退出，Close 由 defer 负责。
+	go proxies.Run(ctx)
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 	sch.StartTaskSweep(ctx, cfg.TaskSweepInterval)
@@ -367,33 +491,21 @@ func main() {
 	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发或本轮重试仍可补上）。
 	go warmModelRates(ctx, up, p)
 
-	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           h,
-		ReadHeaderTimeout: 30 * time.Second,
-		// ReadTimeout 覆盖整个请求读取（含 body 上传）：防慢速 body 拖死连接。
-		// 请求体已无网关侧上限（max_body_mb 移除）。缺省 300s（issue #100：旧固定
-		// 60s 会掐掉大上下文/文件块经反代链的慢速上传，客户端收到
-		// 400 "read body: ... i/o timeout"）；server.read_timeout="0" 显式关闭。
-		// 改动需重启进程。
-		ReadTimeout: cfg.ServerReadTimeoutDur,
-		// IdleTimeout keep-alive 空闲连接回收：配合 chat 出站 ctx 传播防连接泄漏堆积。
-		// 注意：SSE 流式响应期间连接非空闲，不受此项掐断；不设全局 WriteTimeout
-		// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。
-		IdleTimeout: 120 * time.Second,
-	}
+	// 监听器支持 listen/read_timeout 进程内热切换；ReadTimeout 覆盖整个请求读取
+	//（含 body 上传），缺省 300s，"0" = 不限制。
 	go func() {
 		<-ctx.Done()
 		p.Flush() // 信号触发：先落盘再做优雅停机
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		srvRunner.Shutdown(shutdownCtx)
 	}()
 
 	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srvRunner.Start(h, cfg); err != nil {
 		log.Fatalf("http: %v", err)
 	}
+	<-ctx.Done()
 	log.Printf("bye")
 }
 
@@ -452,7 +564,6 @@ func panelListenPath(listen string) string {
 //
 // 热生效范围（设计取舍）：
 //   - api_key / cooldown.soft_rate / features.sanitize_blacklist_fingerprints → livecfg 快照
-//   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetPreferExpiring/SetCreditFloor
 //   - schedule.* → scheduler.Reconfigure/SetBalanceInterval/SetExpiringSoonWindow
 //
 // 需重启（涉及监听地址、HTTP client 超时、auth_dir 等装配期依赖）：
@@ -461,7 +572,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, sess *session.Router, reqLog *reqlog.Recorder, srv *serverRunner, pn *panel.Panel, reloadStore func(url, token string)) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -529,11 +640,23 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		HiddenModels:         livecfg.NormalizeHiddenModels(newCfg.Models.Hidden),
 		BareModelIDs:         newCfg.Models.BareIDs,
 		PreferredRealm:       newCfg.Pool.PreferredRealm,
+		PromptMode:           newCfg.Prompt.Mode,
+		PromptText:           newCfg.PromptText,
+		MaxPayloadBytes:      newCfg.Server.MaxPayloadBytes,
+		RestrictionHold:      time.Duration(newCfg.Upstream.RestrictionHoldSeconds) * time.Second,
+		GlobalEnabled:        newCfg.Global.Enabled,
+		MetricsEnabled:       newCfg.Metrics.Enabled,
+		AdminEnabled:         newCfg.Admin.Enabled,
+		EmbeddingsEnabled:    newCfg.Features.EmbeddingsEnabled,
+		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,
+		AllowlistEnabled:     len(livecfg.NormalizeAllowedModels(newCfg.Models.Allowed)) > 0,
+		AllowedModels:        livecfg.NormalizeAllowedModels(newCfg.Models.Allowed),
+		RecordContext:        newCfg.Logging.RequestArchiveContext,
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
+	up.SetOptions(upstreamOptionsFrom(up.Options(), newCfg))
+	upstream.SetKeepRecentRounds(newCfg.Prompt.KeepRecentRounds)
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
-	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
-	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
 	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
@@ -554,11 +677,72 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetTaskSweepInterval(newCfg.TaskSweepInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
+	// 会话粘性/请求归档热配置。
+	if sess != nil {
+		sess.Reconfigure(session.Config{TTL: newCfg.SessionTTL, GCInterval: newCfg.SessionGCInterval})
+		sess.SetEnabled(newCfg.SessionSticky.Enabled)
+	}
+	if reqLog != nil {
+		reqLog.SetConfig(reqlog.Config{
+			Dir:           stateSibling(newCfg.StateFile, "request-logs"),
+			Enabled:       newCfg.Logging.RequestArchiveEnabled,
+			RetentionDays: newCfg.Logging.RequestRetentionDays,
+			MaxBytes:      int64(newCfg.Logging.RequestArchiveMaxMB) << 20,
+		})
+	}
+	// listen / read_timeout 变化：进程内重建 listener（旧连接自然结束）。
+	if srv != nil {
+		if err := srv.Reconfigure(newCfg); err != nil {
+			return nil, fmt.Errorf("reconfigure listener: %w", err)
+		}
+	}
+	// auth_dir 变化：重新扫描目录并与池对齐（旧目录账号保留状态，不删除文件）。
+	if pn != nil && newCfg.AuthDir != "" && newCfg.AuthDir != pn.AuthDir() {
+		auths, err := auth.LoadDir(newCfg.AuthDir)
+		if err != nil {
+			return nil, fmt.Errorf("reload auth_dir: %w", err)
+		}
+		p.SyncToDir(auths)
+		pn.SetAuthDir(newCfg.AuthDir)
+		log.Printf("auth_dir 热切换: %s（%d 个账号）", newCfg.AuthDir, len(auths))
+	}
+	// Upstash 变化：重建 store 并重新恢复快照（失败自动降级 Noop）。
+	if reloadStore != nil {
+		reloadStore(newCfg.Upstash.URL, newCfg.Upstash.Token)
+	}
+
 	return restartRequiredFields(newCfg), nil
 }
 
 // applyCNChatBase 把 config cn.chat_base 装配进上游 client；空则保留内置默认，
 // 老配置（无 cn 段）行为不变。
+// upstreamOptionsFrom 把新配置映射为 upstream.Options 快照（热替换用）。
+// 空 base 保留当前值（内置默认由 upstream.New 提供）。
+func upstreamOptionsFrom(cur upstream.Options, cfg *Config) upstream.Options {
+	o := cur
+	o.UserAgent = cfg.Upstream.UserAgent
+	o.ClientVersion = cfg.Upstream.ClientVersion
+	o.CliVersion = cfg.Upstream.CliVersion
+	o.ClientName = cfg.Upstream.ClientName
+	o.DeviceToken = cfg.Upstream.DeviceToken
+	o.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
+	o.PassthroughIP = cfg.Upstream.PassthroughIP
+	o.GlobalEnabled = cfg.Global.Enabled
+	if cfg.CN.ChatBase != "" {
+		o.ChatBaseCN = cfg.CN.ChatBase
+	}
+	if cfg.Global.ChatBase != "" {
+		o.ChatBaseGlobal = cfg.Global.ChatBase
+	}
+	if cfg.Global.BillingBase != "" {
+		o.BillingBaseGlobal = cfg.Global.BillingBase
+	}
+	o.HTTPTimeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	o.HeaderTimeout = time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second
+	o.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
+	return o
+}
+
 func applyCNChatBase(up *upstream.Client, cfg *Config) {
 	if cfg.CN.ChatBase != "" {
 		up.ChatBaseCN = cfg.CN.ChatBase
@@ -569,32 +753,10 @@ func applyCNChatBase(up *upstream.Client, cfg *Config) {
 // 恒返回完整清单中的"与当前进程装配期依赖相关"的项——面板据此提示用户。
 func restartRequiredFields(c *Config) []string {
 	var out []string
-	// 这些字段在进程内被监听地址/HTTP client/目录句柄等装配期对象捕获。
-	if c.Listen != "" {
-		out = append(out, "listen")
-	}
-	if c.AuthDir != "" {
-		out = append(out, "auth_dir")
-	}
+	// 目前仅 state_file 仍为装配期依赖（池状态/日志目录均随它初始化）。
 	if c.StateFile != "" {
 		out = append(out, "state_file")
 	}
-	out = append(out, "upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds")
-	// upstream.user_agent 在装配期被写进出站 client（main.go 的 up.UserAgent = ...），
-	// 之后不再读取——不在 livecfg 热快照里，也无法热改。此前漏列，导致面板改完
-	// 显示"已保存"却不提示需要重启，用户以为没生效（issue #102 附带发现 2）。
-	out = append(out, "upstream.user_agent")
-	// cn.chat_base 同样只在装配期写进 up.ChatBaseCN（请求路径并发读取，不做热改）。
-	out = append(out, "cn.chat_base")
-	if c.Upstash.URL != "" || c.Upstash.Token != "" {
-		out = append(out, "upstash")
-	}
-	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
-	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
-	out = append(out, "server.read_timeout")
-	// 提示词三件套在 handler 装配期固化（main.go 的 NewHandler(PromptMode/PromptText)），
-	// 保存后面板显示"已保存"却不生效——必须进清单，否则用户以为没生效（issue #102 同类）。
-	out = append(out, "prompt.mode", "prompt.file", "prompt.text")
 	return out
 }
 

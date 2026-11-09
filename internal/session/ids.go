@@ -44,6 +44,16 @@ func ResolveConversationID(body []byte) string {
 	return strOrEmpty(obj["conversationId"])
 }
 
+// NewTraceID 生成链路 trace ID：32 hex，纯随机、不带时间位。
+// 官方真机 X-Trace-ID / X-B3-TraceId 恒为纯随机值，故不能复用带时间前缀的 messageID。
+func NewTraceID() string {
+	b := make([]byte, 16)
+	if _, err := cryptorand.Read(b); err != nil {
+		return NewMessageID()
+	}
+	return hex.EncodeToString(b)
+}
+
 // NewMessageID 生成消息级 ID：32 位 hex（UUID v4 去横线的长度形态），对齐官方
 // X-Request-ID / X-Conversation-Message-ID。crypto/rand 失败（理论上不可能）时回落
 // math/rand/v2 双 uint64 拼 32 hex——恒 32 hex、恒合法，可安全用作 B3 TraceId。

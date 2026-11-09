@@ -4,6 +4,7 @@
 package pool
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"strings"
@@ -48,6 +49,21 @@ func (p *Pool) SetNickname(uid, nickname string) bool {
 		return false
 	}
 	return true
+}
+
+// UpdateNickname 面板改名入口：允许空串（清空为“未命名”），并把错误如实返回给调用方。
+// 与 SetNickname 分开，保留既有“空串/无变化返回 false”的同步语义。
+func (p *Pool) UpdateNickname(uid, nickname string) error {
+	if uid == "" {
+		return fmt.Errorf("uid is empty")
+	}
+	p.mu.RLock()
+	e, ok := p.byUID[uid]
+	p.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("account not found")
+	}
+	return e.a.UpdateNickname(nickname)
 }
 
 // NoteCheckinDone 标记账号今日已签到（签到成功与上游"今天已签到"幂等拒绝均算）。

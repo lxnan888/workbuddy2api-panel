@@ -4,12 +4,15 @@ package upstream
 
 import (
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,8 +24,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/proxypool"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -37,7 +42,7 @@ const (
 	ErrServer                        // 5xx 上游故障
 	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
 	ErrBadParams                     // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
-	ErrAccountFault                  // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
+	ErrAccountFault                  // 账号级授权/配额/风控限制（11140 request illegal / unusual activity / 14017 trial not activated）→ 限制记账，不无限重试
 	ErrChannelRefused                // 11128 request illegal 通道校验失败（上游认为请求不是官方客户端发的）→ 不罚账号
 	ErrModelBlocked                  // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
@@ -45,6 +50,7 @@ const (
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrUpstreamBusy                  // 6021「queue.full.title」渠道级容量满载（非账号问题）→ 不罚号、不轮转，末端 503 + upstream_busy
 	ErrClient                        // 其他 4xx / 业务错误
+	ErrModelParamInvalid             // 11133 参数被模型供应商拒绝 → 请求级错误：不罚号、不轮转
 )
 
 func (k ErrKind) String() string {
@@ -79,6 +85,8 @@ func (k ErrKind) String() string {
 		return "channel_refused"
 	case ErrClient:
 		return "client"
+	case ErrModelParamInvalid:
+		return "model_param_invalid"
 	default:
 		return "none"
 	}
@@ -89,6 +97,9 @@ type Error struct {
 	Kind   ErrKind
 	Status int
 	Msg    string
+	// Route 记录本次错误对应的实际出口，供服务端按代理出口归因 WAF。
+	Route    proxypool.Route
+	HasRoute bool
 	// RetryAfter 上游明示的等待时长（Retry-After 秒 / retry-after-ms /
 	// x-ratelimit-reset 头解析，见 ParseRetryAfter）。零值 = 上游未明示，
 	// 冷却时长回落调用方计算值。挂载点选在 Error 信封：Kind 决定「罚不罚」，
@@ -169,6 +180,38 @@ func IsAccountRestricted(body string) bool {
 		return false
 	}
 	return hasBusinessCode(body, "11140")
+}
+
+// restrictionMarkers 11140 账号风控限制文书的实测措辞（中英文）。
+//
+// 这些文案与 11140 的模型级限流变体（"The model provider is rate-limiting
+// requests."）共用同一个业务码，必须 code + 文案双条件才能分开：只按 code 判会把
+// 可自愈的限流当成账号终态，只按文案判会误伤正文里恰好讨论这些词的普通请求。
+var restrictionMarkers = []string{
+	"request illegal",
+	"unusual activity",
+	"账号存在异常行为",
+	"已被限制",
+}
+
+// IsRestricted 报告响应信封是否为「账号被上游风控限制」：结构化 code 11140
+// 加上中英文限制文书（request illegal / unusual activity / 账号存在异常行为 /
+// 已被限制）。这一类判据在上游是设备/出口级，换账号只会连坐，调用方据此终止
+// 轮转并交给限制暂停门（server/restrict.go）处理。
+//
+// 11140 的模型级限流文案不含本表任一措辞，因此不会被误判；11-128 的
+// "request illegal" 因业务码不是 11140 同样不命中。
+func IsRestricted(body string) bool {
+	if !hasBusinessCode(body, "11140") {
+		return false
+	}
+	lower := strings.ToLower(body)
+	for _, m := range restrictionMarkers {
+		if strings.Contains(lower, strings.ToLower(m)) {
+			return true
+		}
+	}
+	return false
 }
 
 // isChannelRefused 报告上游 body 是否为 WorkBuddy 的通道校验失败（11128
@@ -400,6 +443,13 @@ func hasBusinessCode(body, want string) bool {
 // 信封，正常走既有分类）。JSON 解析不做：信封存在性只需字段名命中——
 // 畸形 JSON 但含 `"msg":` 字样仍按业务响应保守处理（宁漏判 WAF 也不误罚
 // 业务 403，后者有各自的权威分类）。
+// IsGatewayUnauthorized 报告 401 响应是否为网关层授权拒绝页（无业务信封）。
+// 边缘（APISIX/openresty）拦下来的 HTML 页没有 {"code":...} 信封，与业务层
+// 401（如 code 12153）可区分。
+func IsGatewayUnauthorized(status int, body string) bool {
+	return status == http.StatusUnauthorized && !hasBusinessEnvelope(body)
+}
+
 func hasBusinessEnvelope(body string) bool {
 	return strings.Contains(body, `"code":`) || strings.Contains(body, `"msg":`)
 }
@@ -416,6 +466,34 @@ func IsWafBlocked(status int, body string) bool {
 // retry-after（秒，RFC 7231）/ retry-after-ms（毫秒）/ x-ratelimit-reset
 // （epoch 秒或毫秒，取 now+ 剩余量）。大小写不敏感（http.Header.Get 已归一）。
 var retryAfterHeaderCandidates = []string{"Retry-After", "Retry-After-Ms", "X-Ratelimit-Reset"}
+
+// parseQueueRetryAfter 从上游 429 body 的 data.retry_after / retry_policy.retry_after
+// 提取等待秒数（渠道满载 6021 常用形态）。
+func parseQueueRetryAfter(body []byte) (time.Duration, bool) {
+	var env struct {
+		Data struct {
+			RetryAfter int64 `json:"retry_after"`
+		} `json:"data"`
+		RetryPolicy struct {
+			RetryAfter int64 `json:"retry_after"`
+		} `json:"retry_policy"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return 0, false
+	}
+	secs := env.Data.RetryAfter
+	if secs <= 0 {
+		secs = env.RetryPolicy.RetryAfter
+	}
+	if secs <= 0 {
+		return 0, false
+	}
+	d := time.Duration(secs) * time.Second
+	if d > retryAfterSanity {
+		return 0, false
+	}
+	return d, true
+}
 
 // retryAfterSanity 解析结果的上限（超过视为上游异常值丢弃，回落本地计算），
 // 与 pool 的 softRateMax 默认 2h 同量级。
@@ -595,6 +673,12 @@ func Classify(status int, body string) ErrKind {
 	if IsAccountRestricted(body) {
 		return ErrAccountFault
 	}
+	// 11140 的第二种形态（账号风控限制文书，中英文）：必须先于 accountFaultMarkers。
+	// 它不一定带 "request illegal" 字样，若一路滑到通用 4xx 兜底（ErrClient）只会
+	// 「换号继续打」，同一请求能把整池账号按顺序送进风控。见 IsRestricted。
+	if IsRestricted(body) {
+		return ErrAccountFault
+	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
 			return ErrAccountFault
@@ -735,6 +819,10 @@ type Client struct {
 	// 面板保存配置热改 + chat 热路径并发读写，用 atomic.Bool 消除数据竞争。
 	SanitizeFingerprints atomic.Bool
 
+	// modelBusyUnsupported 上游 /v2/chat/busy 在该域不存在（国际版实测 404）。
+	// 探到一次即置位，本进程后续跳过繁忙度探测（纯观测数据，不影响选号）。
+	modelBusyUnsupported atomic.Bool
+
 	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认三段式）。
 	// 空 = 默认官方形态：chat/refresh/FetchModels 走
 	// `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<cliVer>`；billing 走 `WorkBuddy/<ver>`
@@ -789,6 +877,26 @@ type Client struct {
 	// creditObserver 余额查询观察者（见 CreditObserver / SetCreditObserver）。
 	// atomic：启动期挂载、运行期并发读，不参与任何出站决策。
 	creditObserver atomic.Pointer[CreditObserver]
+
+	// ProxyPool 出站代理池（nil = 直连/仅环境变量代理）。
+	ProxyPool *proxypool.Manager
+
+	// opts 运行时配置快照（SetOptions 热替换）；nil 时从上方字段兜底。
+	opts atomic.Pointer[Options]
+	// clientMu 保护 HTTP/ChatHTTP 指针的交换与读取。
+	clientMu sync.RWMutex
+
+	// imageChargeMu/imageCharges 出图实扣分档观测（见 images.go 的 ImageChargeAgg）。
+	imageChargeMu sync.Mutex
+	imageCharges  map[string]ImageChargeAgg
+	// imageMu/imageModels 出图/出视频模型旁路留存（见 images.go）。
+	imageMu     sync.Mutex
+	imageModels map[string][]ModelInfo
+
+	// TLSFingerprint 出站 ClientHello 指纹档位（"node" 复刻官方 / "go" 原生）。
+	TLSFingerprint string
+	// dialer 当前出站拨号器；设置 DNS 或切换 TLS 指纹时重建拨号闭包用。
+	dialer *net.Dialer
 }
 
 // CreditObserver 余额查询观察者：每次**真实查到**余额后回调（uid + 余额绝对值）。
@@ -810,7 +918,9 @@ func New() *Client {
 		WebBaseCN:     "https://www.workbuddy.cn",
 		// GlobalEnabled 缺省 true（与 config global.enabled 缺省 true 一致；纯 CN 部署行为不变：
 		// CN 账号恒判 cn，global base 只在 realm=global 的账号上被使用）。
-		GlobalEnabled: true,
+		GlobalEnabled:  true,
+		TLSFingerprint: TLSFingerprintNode,
+		dialer:         newDialer(),
 	}
 	c.SanitizeFingerprints.Store(true)
 	return c
@@ -818,6 +928,8 @@ func New() *Client {
 
 // chatHTTP 返回聊天专用 client；未设置（如测试只注入 HTTP）时回落 HTTP。
 func (c *Client) chatHTTP() *http.Client {
+	c.clientMu.RLock()
+	defer c.clientMu.RUnlock()
 	if c.ChatHTTP != nil {
 		return c.ChatHTTP
 	}
@@ -829,16 +941,16 @@ const defaultGlobalBase = "https://www.workbuddy.ai"
 
 // globalChatBase 生效的 global chat base：Client.ChatBaseGlobal 非空取之，否则默认。
 func (c *Client) globalChatBase() string {
-	if c.ChatBaseGlobal != "" {
-		return c.ChatBaseGlobal
+	if c.Options().ChatBaseGlobal != "" {
+		return c.Options().ChatBaseGlobal
 	}
 	return defaultGlobalBase
 }
 
 // globalBillingBase 生效的 global billing base：Client.BillingBaseGlobal 非空取之，否则默认。
 func (c *Client) globalBillingBase() string {
-	if c.BillingBaseGlobal != "" {
-		return c.BillingBaseGlobal
+	if c.Options().BillingBaseGlobal != "" {
+		return c.Options().BillingBaseGlobal
 	}
 	return defaultGlobalBase
 }
@@ -846,7 +958,7 @@ func (c *Client) globalBillingBase() string {
 // globalOn 报告账号是否路由到 global 上游：GlobalEnabled 开且账号 Realm()==global。
 // 双保险：config 开关是第一道闸（上游侧），auth.Realm() 的开关闸是第二道（账号侧）。
 func (c *Client) globalOn(a *auth.Auth) bool {
-	return c.GlobalEnabled && a != nil && a.Realm() == "global"
+	return c.Options().GlobalEnabled && a != nil && a.Realm() == "global"
 }
 
 // 路径常量：CN 与 global 共用的 chat 出站路径（/v2 单路径）。
@@ -893,12 +1005,12 @@ func (c *Client) chatBase(a *auth.Auth) string {
 	if c.globalOn(a) {
 		return c.globalChatBase()
 	}
-	return c.ChatBaseCN
+	return c.Options().ChatBaseCN
 }
 
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
-func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
+func (c *Client) prepareBody(body []byte, realm, uid, conversationID, convReqID string) []byte {
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	if realmKey(realm) == "global" {
 		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位如
@@ -910,6 +1022,8 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)
+	// 会话轮级字段（body 侧与头侧保持一致）。
+	body = injectConversationFields(body, convReqID)
 	return body
 }
 
@@ -956,7 +1070,7 @@ func (c *Client) billingBase(a *auth.Auth) string {
 	if c.globalOn(a) {
 		return c.globalBillingBase()
 	}
-	return c.BillingBaseCN
+	return c.Options().BillingBaseCN
 }
 
 // webBase 返回官网域（任务领奖类接口；未注入时回落默认）。
@@ -965,8 +1079,8 @@ func (c *Client) webBase(a *auth.Auth) string {
 	if c.globalOn(a) {
 		return defaultGlobalBase
 	}
-	if c.WebBaseCN != "" {
-		return c.WebBaseCN
+	if c.Options().WebBaseCN != "" {
+		return c.Options().WebBaseCN
 	}
 	return "https://www.workbuddy.cn"
 }
@@ -974,20 +1088,21 @@ func (c *Client) webBase(a *auth.Auth) string {
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
-func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := c.HTTP.Do(req)
+func (c *Client) doJSON(req *http.Request, a *auth.Auth) (json.RawMessage, error) {
+	resp, route, err := c.doRoute(req, a, false)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := readDecodedBody(resp, 1<<20)
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200), Route: route, HasRoute: c.ProxyPool != nil && a != nil}
 	}
+
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
@@ -997,9 +1112,38 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160))}
+		return nil, &Error{
+			Kind: kind, Status: resp.StatusCode,
+			Msg:   fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160)),
+			Route: route, HasRoute: c.ProxyPool != nil && a != nil,
+		}
 	}
 	return env.Data, nil
+}
+
+// readDecodedBody 按 Content-Encoding 解压响应体（gzip/deflate/br）。
+// RPC 头族显式声明 Accept-Encoding 关闭了 Go 的透明解压，这里补齐。
+func readDecodedBody(resp *http.Response, limit int64) ([]byte, error) {
+	var r io.Reader = resp.Body
+	switch strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))) {
+	case "gzip":
+		zr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		r = zr
+	case "deflate":
+		zr, err := zlib.NewReader(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		r = zr
+	case "br":
+		r = brotli.NewReader(resp.Body)
+	}
+	return io.ReadAll(io.LimitReader(r, limit))
 }
 
 // RefreshToken 刷新 access token；成功时更新 a 的字段（缺省值保留旧值），
@@ -1134,7 +1278,7 @@ func (c *Client) refreshTokenOnce(a *auth.Auth) error {
 	c.RefreshHeaders(req, &hdrSnapshot)
 
 	// 网络 I/O（锁外，30s 上限）。
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(req, a)
 	if err != nil {
 		return err
 	}
@@ -1212,7 +1356,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID, meta.ConversationRequestID)
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}
@@ -1230,14 +1374,16 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
-		resp, err := c.chatHTTP().Do(req)
+		resp, route, err := c.doRoute(req, a, true)
 		if err != nil {
 			cancel()
 			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
 			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固）：失败连接可能仍
 			// 留在空闲池里，下一个请求会继续捡到它——仅靠 IdleConnTimeout 等过期
-			// 不够，主动清池才断根。
-			roundTripCloseIdle(c.chatHTTP().Transport)
+			// 不够，主动清池才断根。代理错误由代理池按节点清理，不能误清全局池。
+			if !proxypool.IsError(err) {
+				roundTripCloseIdle(c.chatHTTP().Transport)
+			}
 			return nil, 0, nil, err
 		}
 		if resp.StatusCode >= 400 {
@@ -1259,7 +1405,11 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			if kind == ErrNone {
 				return nil, resp.StatusCode, raw, nil
 			}
-			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+			ue := &Error{
+				Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200),
+				Route: route, HasRoute: c.ProxyPool != nil && a != nil,
+			}
+
 			if d, ok := ParseRetryAfter(resp.Header); ok {
 				ue.RetryAfter = d
 			}
@@ -1268,7 +1418,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
 		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
 		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
-		return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
+		return monitorBody(resp.Body, c.Options().IdleTimeout, cancel), resp.StatusCode, nil, nil
 	}
 	panic("unreachable: chatPaths is never empty") // for range 空集时编译器仍要求兜底 return；chatPaths 恒非空（构造保证），永不触达
 }
@@ -1276,6 +1426,19 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 // ModelInfo 动态模型信息（含 maxInputTokens/maxOutputTokens + 上游模型对象全字段）。
 // CN /console 与 global /v2 的模型对象同构，故共用此结构；上游省略的字段保持零值，
 // /v1/models 侧按「空值省略」透出（不编造）。
+// generationKind 从 tags 判媒体生成类型（"" = 非生成模型）。
+func generationKind(tags []string) string {
+	for _, t := range tags {
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "text-to-image", "image-to-image":
+			return "image"
+		case "text-to-video", "image-to-video":
+			return "video"
+		}
+	}
+	return ""
+}
+
 type ModelInfo struct {
 	ID            string
 	Name          string
@@ -1307,6 +1470,8 @@ type ModelInfo struct {
 	PromoCredits string   // 折扣后倍率原文（如 "0x" / "0.50x"），仅展示
 	PromoLabel   string   // 徽章文案（限时免费 / 夜间折扣 / 错峰使用）
 	PromoNote    string   // hover 说明原文（含时段/日期描述）
+	// GenerationKind 媒体生成类型（"image"/"video"），仅旁路留存设置（见 images.go）。
+	GenerationKind string
 }
 
 // dynModelEntry 上游模型目录（CN /console 与 global /v2 同构）的单条模型解析形态，
@@ -1519,7 +1684,7 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	// AccessToken 加锁快照（见 auth.AccessTokenValue：keepalive 刷新在 a.mu 内改写）。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req, a, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1873,7 +2038,7 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	}
 	req.Header.Set("User-Agent", ua)
 	c.injectCodeBuddyRequest(req)
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req, a, false)
 	if err != nil {
 		return nil, err
 	}

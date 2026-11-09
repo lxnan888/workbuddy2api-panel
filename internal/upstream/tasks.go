@@ -1,6 +1,6 @@
 // tasks.go growth 域「任务」接口：列表查询 / 接受 / 领取奖励。
 //
-// 来源：上游 scripts/task_common.py 实测口径（list_tasks/accept_tasks/claim_reward），
+// 来源：上游 tests/scripts/task_common.py 实测口径（list_tasks/accept_tasks/claim_reward），
 // 集成进主程序后不再需要外部脚本。
 //
 // 端点（chatBase，BillingHeaders）：
@@ -24,7 +24,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
-// growth 域任务路径（与 scripts/task_common.py 对齐）。
+// growth 域任务路径（与 tests/scripts/task_common.py 对齐）。
 const (
 	tasksListPath   = "/v2/activity/growth/tasks"
 	tasksAcceptPath = "/v2/activity/growth/tasks/accept"
@@ -98,7 +98,7 @@ func (c *Client) growthJSONMP(a *auth.Auth, method, path string, body any) (json
 	}
 	c.BillingHeaders(req, a)
 	req.Header.Set("X-Client-Platform", mpPlatform)
-	return c.doJSON(req)
+	return c.doJSON(req, a)
 }
 
 // AcceptTasksMP 接受小程序限定任务（mp 头；缺头实测 task not found）。
@@ -119,7 +119,7 @@ func (c *Client) ClaimRewardMP(a *auth.Auth, taskCode string) (credit, energy in
 	}
 	c.BillingHeaders(req, a)
 	req.Header.Set("X-Client-Platform", mpPlatform)
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(req, a)
 	if err != nil {
 		// chat 域对该路径 400（部分任务/租户形态）→ Web 域降级（已实测可领）。
 		if ue, ok := err.(*Error); ok && ue.Status == http.StatusBadRequest {
@@ -252,7 +252,7 @@ func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int6
 		req.Header.Set("X-Domain", d)
 	}
 
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(req, a)
 	if err != nil {
 		return 0, 0, err
 	}

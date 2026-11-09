@@ -108,7 +108,7 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			Domain:       acc.Domain,
 			UID:          uid,
 			Nickname:     nickname,
-			FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", uid)),
+			FilePath:     filepath.Join(p.AuthDir(), fmt.Sprintf("workbuddy-%s.json", uid)),
 		}
 
 		if realm == "global" {
@@ -129,6 +129,7 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 
 		p.cfg.Pool.Add(a)
 		p.cfg.Pool.Revive(uid)
+		p.StartNewAccountTasks(uid)
 
 		// 顺带签到/激活（幂等；失败仅记日志，不阻断导入）。
 		if realm == "global" {

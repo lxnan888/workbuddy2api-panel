@@ -69,7 +69,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if floorBlocked(e) {
 			continue // 积分保底：触底号不接实测收费模型（tier 0/1 不受限）
 		}
-		if p.inFlightFull(e) {
+		if p.concurrencyFull(e) {
 			continue // 在途占满：跳过（max=0 不限时不触发）
 		}
 		cands = append(cands, e)
@@ -330,7 +330,7 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if p.floorBlockedForRealmModel(e, model, realm, now) {
 			continue // 积分保底：触底号不接收费模型（兜底路径同判据）
 		}
-		if p.inFlightFull(e) {
+		if p.concurrencyFull(e) {
 			continue
 		}
 		exp := e.expiry(now)
@@ -355,10 +355,10 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 	return best.a
 }
 
-// inFlightFull 报告账号是否已占满在途名额（上限按 realm 分档，见 inFlightLimit；
+// concurrencyFull 报告账号是否已占满在途名额（上限按 realm 分档，见 concurrencyLimit；
 // limit=0 不限 → 恒 false）。调用方需已持 p.mu（读锁或写锁均可，本方法只读上限）。
-func (p *Pool) inFlightFull(e *entry) bool {
-	limit := p.inFlightLimit(e)
+func (p *Pool) concurrencyFull(e *entry) bool {
+	limit := p.concurrencyLimit(e)
 	if limit <= 0 {
 		return false
 	}

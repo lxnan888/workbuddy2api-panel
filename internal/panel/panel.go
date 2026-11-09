@@ -19,13 +19,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/balance"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/proxypool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -64,11 +67,19 @@ type Config struct {
 	// CreditHistory 积分变动账本（nil = 积分历史接口返回 501）。只读展示：
 	// 留痕由余额查询路径（upstream.Client 的余额观察者）写入。
 	CreditHistory *credithist.Ledger
+	// Balance 余额趋势采样（nil = 趋势接口返回 501）。
+	Balance *balance.Recorder
 
-	// ProbeFile 模型输出上限探测结果文件（scripts/probe_max_tokens.py --panel-out
+	// ProbeFile 模型输出上限探测结果文件（tests/scripts/probe_max_tokens.py --panel-out
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// ProxyPool 出站代理池（nil = 未启用，代理池页返回 501）。
+	ProxyPool *proxypool.Manager
+
+	// AutoTasksEnabled 自动成长任务开关（nil = 关闭）。
+	AutoTasksEnabled func() bool
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -94,6 +105,15 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// proxyAccountMu 串行化账号/realm 代理绑定的读-改-写。
+	proxyAccountMu sync.Mutex
+
+	// authDir 凭证目录（面板保存 auth_dir 后可热切换）。
+	authDir atomic.Pointer[string]
+
+	// taskJobs 持久化后台任务服务（taskjobs.go）。
+	taskJobs *taskJobManager
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -143,8 +163,30 @@ func New(cfg Config) *Panel {
 		logs:    NewRing(500),
 		logins:  map[string]loginSession{},
 	}
+	dir := cfg.AuthDir
+	p.authDir.Store(&dir)
 	p.routes()
 	return p
+}
+
+// AuthDir 返回当前凭证目录（热改安全）。
+func (p *Panel) AuthDir() string {
+	if p == nil {
+		return ""
+	}
+	if d := p.authDir.Load(); d != nil {
+		return *d
+	}
+	return p.cfg.AuthDir
+}
+
+// SetAuthDir 热切换凭证落盘目录（OAuth 登录/导入使用）。
+func (p *Panel) SetAuthDir(dir string) {
+	if p == nil {
+		return
+	}
+	d := dir
+	p.authDir.Store(&d)
 }
 
 // Logs 返回日志环形缓冲（main 经 MultiWriter 镜像 log 与 chat 表格日志进来）。
@@ -155,11 +197,13 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
 	p.mux.HandleFunc("GET /panel/mobile.css", p.mobileStyle)
 	p.mux.HandleFunc("GET /panel/mobile.js", p.mobileScript)
+	p.proxyRoutes()
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
 	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistory))
+	p.mux.HandleFunc("GET /panel/api/balance_history", p.withAuth(p.balanceHistory))
 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
@@ -172,6 +216,11 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/nickname", p.withAuth(p.accountNickname))
+	p.mux.HandleFunc("PUT /panel/api/accounts/{uid}/concurrency", p.withAuth(p.accountConcurrency))
+	p.mux.HandleFunc("GET /panel/api/tasks/jobs", p.taskJobsHandler)
+	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks/job", p.taskJobStatus)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/job", p.startTaskJob)
 	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.withAuth(p.accountTasks))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.withAuth(p.accountTaskAccept))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.withAuth(p.taskAcceptAll))
@@ -273,6 +322,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"paused":          paused,
 		"in_flight_full":  inFlightFull,
 		"accounts":        p.cfg.Pool.List(),
+		"proxy_pool":      p.proxySnapshot(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
@@ -518,7 +568,7 @@ func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string
 	return entry
 }
 
-// modelProbes 返回模型输出上限的探测结果（scripts/probe_max_tokens.py --panel-out
+// modelProbes 返回模型输出上限的探测结果（tests/scripts/probe_max_tokens.py --panel-out
 // 写入的契约文件），供前端在「模型与档位」的实测列做风险标注。
 //
 // 设计边界：纯只读透传——文件缺失/未配置返回空集（面板退化为无标注，与历史行为
@@ -696,6 +746,11 @@ func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
+	}
+	if p.cfg.ProxyPool != nil {
+		if err := p.cfg.ProxyPool.Unbind(uid); err != nil {
+			log.Printf("panel: remove uid=%s（代理绑定解绑失败: %v）", uid, err)
+		}
 	}
 	fileMsg := ""
 	if a.FilePath != "" {

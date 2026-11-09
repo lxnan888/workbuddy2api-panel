@@ -46,6 +46,8 @@ type Config struct {
 		// 关掉。关闭后 Event.ClientIP/UserAgent 保持为空，归档里不出现该字段。
 		// 热生效（经 livecfg 快照），无需重启。
 		RequestClientInfo bool `json:"request_client_info"`
+		// RequestArchiveContext 是否把会话上下文记入请求事件日志（缺省 false）。
+		RequestArchiveContext bool `json:"request_archive_context"`
 	} `json:"logging"`
 
 	Server struct {
@@ -55,6 +57,10 @@ type Config struct {
 		// 400 "read body: ... i/o timeout"。缺省 "300s"；"0" = 不限制
 		//（慢速 body 可无限占用连接，自担风险）；改动需重启进程。
 		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+		// MaxPayloadBytes 入站请求体安全上限（字节），缺省 67108864（64 MiB）。
+		// 只挡大到能把进程读死的上传，不做内容预拦截；超限回 413。允许范围
+		// 8–512 MiB，改动需重启进程。见 internal/server/bodylimit.go。
+		MaxPayloadBytes int64 `json:"max_payload_bytes"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -66,6 +72,54 @@ type Config struct {
 		// 空值回落默认，非法值报错（处理风格同 soft_rate）。
 		SoftRateMax string `json:"soft_rate_max"` // "2h"
 	} `json:"cooldown"`
+
+	// Budget 积分闸：当日累计上限 / 5 分钟突发 / 连续低缓存率。0 = 关闭对应闸。
+	Budget struct {
+		DailyCreditLimit float64 `json:"daily_credit_limit"`
+		BurstCreditLimit float64 `json:"burst_credit_limit"`
+		CacheLowRate     float64 `json:"cache_low_rate"`
+	} `json:"budget"`
+
+	// Metrics 是否开放 GET /metrics（仍走 API key 鉴权）。
+	Metrics struct {
+		Enabled bool `json:"enabled"`
+	} `json:"metrics"`
+
+	// Admin 运维端点开关（目前用于 POST /admin/tasks/{name}/run）。
+	Admin struct {
+		Enabled      bool   `json:"enabled"`
+		AuditEnabled bool   `json:"audit_enabled"`
+		AuditFile    string `json:"audit_file"`
+	} `json:"admin"`
+
+	// Update 自动更新（原生 Release）。
+	Update struct {
+		AutoEnabled bool   `json:"auto_enabled"`
+		AutoTime    string `json:"auto_time"`
+	} `json:"update"`
+
+	// Alerting 账号池健康告警 webhook。
+	Alerting struct {
+		Enabled             bool   `json:"enabled"`
+		WebhookURL          string `json:"webhook_url"`
+		Secret              string `json:"secret"`
+		IntervalSeconds     int    `json:"interval_seconds"`
+		TimeoutSeconds      int    `json:"timeout_seconds"`
+		StartupGraceSeconds int    `json:"startup_grace_seconds"`
+		MinHealthyCN        int    `json:"min_healthy_cn"`
+		MinHealthyGlobal    int    `json:"min_healthy_global"`
+		RecoverHealthy      int    `json:"recover_healthy"`
+		BreakerThreshold    int    `json:"breaker_threshold"`
+		ForTicks            int    `json:"for_ticks"`
+		ClearTicks          int    `json:"clear_ticks"`
+		SendResolve         bool   `json:"send_resolve"`
+	} `json:"alerting"`
+
+	// Watchdog 上游目录改版监控。
+	Watchdog struct {
+		Enabled         bool `json:"enabled"`
+		IntervalSeconds int  `json:"interval_seconds"`
+	} `json:"watchdog"`
 
 	Schedule struct {
 		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
@@ -167,11 +221,19 @@ type Config struct {
 		DeviceTokenFile string `json:"device_token_file"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// RestrictionHoldSeconds 11140 风控连坐的全池暂停时长（秒），缺省 1800。
+		// 短窗口内不同账号被上游判「异常行为」时暂停派发；0 = 只保留「命中即停手」，
+		// 不暂停全池。改动需重启进程。见 internal/server/restrict.go。
+		RestrictionHoldSeconds int `json:"restriction_hold_seconds"`
 	} `json:"upstream"`
 
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// EmbeddingsEnabled 实验特性：/v1/embeddings 总开关（默认关闭，热生效）。
+		EmbeddingsEnabled bool `json:"embeddings_enabled"`
+		// WatermarkStripEnabled 实验特性：/v1/images/strip-watermark 总开关。
+		WatermarkStripEnabled bool `json:"watermark_strip_enabled"`
 	} `json:"features"`
 
 	Models struct {
@@ -185,6 +247,8 @@ type Config struct {
 		// 裸 ID 的路由由 pool.preferred_realm（首选域）+ pool.cross_domain_fallback
 		// （选不到号时是否跨域）共同决定。面板保存后经 livecfg 热生效，无需重启。
 		BareIDs bool `json:"bare_ids"`
+		// Allowed 对外暴露的模型白名单；空 = 不启用。语法同 Hidden。
+		Allowed []string `json:"allowed"`
 	} `json:"models"`
 
 	Prompt struct {
@@ -195,6 +259,9 @@ type Config struct {
 		// File 提示词文件路径；空 = 内置默认 defaultprompt.md；
 		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到内置默认）。
 		File string `json:"file"`
+		// KeepRecentRounds 只保留最近 N 轮对话（一轮=一条 user 消息及其回复）；
+		// 0 = 不裁剪（默认）。system 消息永不删除。面板保存后热生效。
+		KeepRecentRounds int `json:"keep_recent_rounds"`
 	} `json:"prompt"`
 
 	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
@@ -208,8 +275,10 @@ type Config struct {
 	Pool struct {
 		Strategy           pool.RegionStrategies   `json:"strategy"`
 		AccountOrder       pool.RegionAccountOrder `json:"account_order,omitempty"`
-		MaxInFlight        int                     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
-		MaxInFlightGlobal  int                     `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 风控紧域压低并发），0 = 回落默认 2
+		// ConcurrencyWaitTimeout 全部账号并发满时的最长等待时长（默认 "30s"）。
+		ConcurrencyWaitTimeout string `json:"concurrency_wait_timeout"`
+		// ConcurrencyWaitQueue 全部账号并发满时允许排队的请求上限（默认 100）。
+		ConcurrencyWaitQueue int    `json:"concurrency_wait_queue"`
 		BreakerThreshold   int                     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
 		BreakerCooldown    string                  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
 		BreakerCooldownMax string                  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
@@ -244,7 +313,7 @@ type Config struct {
 		// 开启后：请求模型名不带 realm 前缀时，首选域（pool.preferred_realm）选不到可用
 		// 账号（账号级冷却/熔断/在途占满，或该域账号对这个模型 11102 后进入模型级负缓存）
 		// 会自动改用另一域再选一次；显式 cn:/global: 前缀不受影响，行为与引入前完全一致。
-		// 语义取舍：跨域会消耗另一个域的额度，属策略选择；本 fork 默认开启（客户端只写
+		// 语义取舍：跨域会消耗另一个域的额度，属策略选择；本 本项目 默认开启（客户端只写
 		// 一个模型名即可跟随账号池），需要严格锁域时显式关掉即可。
 		CrossDomainFallback bool `json:"cross_domain_fallback"`
 		// PreferredRealm 裸模型名的首选域（"cn" 国内优先 / "global" 国际优先），默认 "cn"。
@@ -275,6 +344,8 @@ type Config struct {
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
+	// ConcurrencyWaitTimeoutDur 解析后的并发满等待时长。
+	ConcurrencyWaitTimeoutDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -288,6 +359,14 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.ReadTimeout = "300s"
+	c.Server.MaxPayloadBytes = 64 << 20
+	// 积分闸默认全关（0 = 对应闸关闭）；metrics/admin 缺省关闭。
+	c.Budget.DailyCreditLimit = 0
+	c.Budget.BurstCreditLimit = 0
+	c.Budget.CacheLowRate = 0
+	c.Metrics.Enabled = false
+	c.Admin.Enabled = false
+	c.Server.MaxPayloadBytes = 64 << 20
 	c.Panel.PackageDetailLimit = 5
 	c.Logging.RequestArchiveEnabled = true
 	c.Logging.RequestRetentionDays = 7
@@ -314,6 +393,8 @@ func Default() *Config {
 	c.Schedule.TaskSweepEnabled = true
 	c.Schedule.TaskSweepMinutes = 15
 	c.Upstream.TimeoutSeconds = 120
+	// 11140 风控连坐的全池暂停时长，缺省 30 分钟；显式 0 = 只停手不暂停全池。
+	c.Upstream.RestrictionHoldSeconds = 1800
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
 	c.Upstream.IdleTimeoutSeconds = 0
@@ -321,13 +402,12 @@ func Default() *Config {
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
 	c.Features.SanitizeBlacklistFingerprints = true
+	c.Features.EmbeddingsEnabled = false
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	c.Pool.Strategy = pool.RegionStrategies{Domestic: pool.WeightedRandom, International: pool.WeightedRandom}
-	c.Pool.MaxInFlight = 3
-	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403 修复
-	// P1-1）；0/负数 normalize 回落默认（与 max_in_flight 的 0=不限语义不同，分档键
-	// 的 0 没有合理语义，回退分档默认最稳）。
-	c.Pool.MaxInFlightGlobal = 2
+	// 并发满等待：默认 30s、最多 100 个请求排队（对齐 sub2api 的快速等待口径）。
+	c.Pool.ConcurrencyWaitTimeout = "30s"
+	c.Pool.ConcurrencyWaitQueue = 100
 	c.Pool.BreakerThreshold = 3
 	c.Pool.BreakerCooldown = "30m"
 	c.Pool.BreakerCooldownMax = "6h"
@@ -337,7 +417,7 @@ func Default() *Config {
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.PreferExpiring = true
-	// 裸模型名跨域回退：本 fork 默认开启（客户端只写一个模型名即可跟随账号池）。
+	// 裸模型名跨域回退：本 本项目 默认开启（客户端只写一个模型名即可跟随账号池）。
 	c.Pool.CrossDomainFallback = true
 	// 裸名首选域默认国内（cn）；显式 cn:/global: 前缀不受影响。
 	c.Pool.PreferredRealm = "cn"
@@ -533,6 +613,27 @@ func (c *Config) normalize() error {
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)
 	}
+	// 入站 body 上限：0/未配置回落 64 MiB；允许范围 8–512 MiB。
+	// 下限防「配成 1KB 把正常多图会话拦掉」，上限防「配成几 GB 后护栏形同虚设」。
+	if c.Server.MaxPayloadBytes == 0 {
+		c.Server.MaxPayloadBytes = 64 << 20
+	}
+	if c.Server.MaxPayloadBytes < 8<<20 || c.Server.MaxPayloadBytes > 512<<20 {
+		return fmt.Errorf("server.max_payload_bytes: %d 超出允许范围 8–512 MiB", c.Server.MaxPayloadBytes)
+	}
+	// 积分闸参数负值无意义：静默钳 0（= 关闭对应闸），与既有“负值钳 0”风格一致。
+	if c.Budget.DailyCreditLimit < 0 {
+		c.Budget.DailyCreditLimit = 0
+	}
+	if c.Budget.BurstCreditLimit < 0 {
+		c.Budget.BurstCreditLimit = 0
+	}
+	if c.Budget.CacheLowRate < 0 {
+		c.Budget.CacheLowRate = 0
+	}
+	if c.Upstream.RestrictionHoldSeconds < 0 {
+		return fmt.Errorf("upstream.restriction_hold_seconds: 负值 %d 无意义（0 = 关闭全池暂停）", c.Upstream.RestrictionHoldSeconds)
+	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)
 	}
@@ -554,6 +655,18 @@ func (c *Config) normalize() error {
 	}
 	if c.DegradeCooldownMaxD, err = time.ParseDuration(c.Pool.DegradeCooldownMax); err != nil {
 		return fmt.Errorf("pool.degrade_cooldown_max: %w", err)
+	}
+	if c.Pool.ConcurrencyWaitTimeout == "" {
+		c.Pool.ConcurrencyWaitTimeout = "30s"
+	}
+	if c.ConcurrencyWaitTimeoutDur, err = time.ParseDuration(c.Pool.ConcurrencyWaitTimeout); err != nil {
+		return fmt.Errorf("pool.concurrency_wait_timeout: %w", err)
+	}
+	if c.ConcurrencyWaitTimeoutDur < 0 {
+		return fmt.Errorf("pool.concurrency_wait_timeout: 负时长 %q 无意义", c.Pool.ConcurrencyWaitTimeout)
+	}
+	if c.Pool.ConcurrencyWaitQueue <= 0 {
+		c.Pool.ConcurrencyWaitQueue = 100
 	}
 	if c.SessionTTL, err = time.ParseDuration(c.SessionSticky.TTL); err != nil {
 		return fmt.Errorf("session_sticky.ttl: %w", err)
@@ -607,10 +720,7 @@ func (c *Config) normalize() error {
 	if c.Pool.DegradeCooldownMax == "" {
 		c.Pool.DegradeCooldownMax = "2h"
 	}
-	// global 在途分档：0/负数视为未设置回落默认 2（WAF 403 修复 P1-1）。
-	if c.Pool.MaxInFlightGlobal <= 0 {
-		c.Pool.MaxInFlightGlobal = 2
-	}
+	// global 在途分档已改为每账号并发（默认国内 3 / 国际 2，账号可覆盖）。
 	if c.Pool.IdleWeightPerHour <= 0 {
 		c.Pool.IdleWeightPerHour = 0.5
 	}
@@ -678,6 +788,9 @@ func (c *Config) normalize() error {
 // （两模式共用同一加载路径，PromptText 均非空）。
 // passthrough 模式不加载文本（透传客户端原始 system，文本在降级时用 prompt.Degraded）。
 func (c *Config) normalizePrompt() error {
+	if c.Prompt.KeepRecentRounds < 0 {
+		c.Prompt.KeepRecentRounds = 0
+	}
 	switch m := strings.ToLower(strings.TrimSpace(c.Prompt.Mode)); m {
 	case "", "passthrough":
 		c.Prompt.Mode = "passthrough"

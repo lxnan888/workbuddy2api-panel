@@ -1,5 +1,5 @@
 // tool_pairing.go 出站请求体的孤儿 tool_call↔tool 配对清理 + tool 结果块重排
-// （吸收参考仓库 sse.ts:91-123 resolveToolPairing 语义，适配网关的 OpenAI wire 消息形态）。
+// （吸收历史实测 sse.ts:91-123 resolveToolPairing 语义，适配网关的 OpenAI wire 消息形态）。
 //
 // 背景：OpenAI 兼容协议要求带 tool_calls 的 assistant 消息，其每一个 tool_call id
 // 都必须有对应的一条 role:tool 结果消息；反之 role:tool 消息也必须有对应的前置
@@ -110,7 +110,7 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 }
 
 // cleanupOrphanToolCalls 剔除无法配对的 tool_call 与 tool 结果（所有模型，独立于
-// deepseek-only 的 sanitize 开关）。语义对齐参考仓库 resolveToolPairing：
+// deepseek-only 的 sanitize 开关）。语义对齐历史实测 resolveToolPairing：
 //
 //   - 收集全线 role:tool 消息的 tool_call_id（结果集）与 assistant.tool_calls[].id（调用集）；
 //   - 一批 assistant.tool_calls 按 keepCalls 对称裁剪：只留有结果配对的调用（部分保留

@@ -26,6 +26,26 @@ type Snapshot struct {
 	// PreferredRealm 裸模型名的首选域（pool.preferred_realm）："cn"/"global"。
 	// 空串按 "cn" 解释（与 config.normalize 的兜底一致）。热改安全。
 	PreferredRealm string
+	// PromptMode / PromptText 提示词模式与文本（custom/append 使用）。
+	PromptMode string
+	PromptText string
+	// MaxPayloadBytes 入站请求体上限；RestrictionHold 11140 连坐暂停时长。
+	MaxPayloadBytes int64
+	RestrictionHold time.Duration
+	// GlobalEnabled global realm 路由开关。
+	GlobalEnabled bool
+	// MetricsEnabled / AdminEnabled 运维端点开关。
+	MetricsEnabled bool
+	AdminEnabled   bool
+	// EmbeddingsEnabled 实验特性：/v1/embeddings 总开关。
+	EmbeddingsEnabled bool
+	// WatermarkStripEnabled 实验特性：/v1/images/strip-watermark 总开关。
+	WatermarkStripEnabled bool
+	// AllowlistEnabled/AllowedModels models.allowed 白名单（空 = 不启用）。
+	AllowlistEnabled bool
+	AllowedModels    map[string]struct{}
+	// RecordContext 是否把请求上下文记入请求事件日志。
+	RecordContext bool
 }
 
 // Holder 原子持有当前快照。
@@ -54,8 +74,7 @@ func (h *Holder) Load() Snapshot {
 // Store 整体替换快照。
 func (h *Holder) Store(s Snapshot) { h.p.Store(&s) }
 
-// NormalizeHiddenModels 把用户配置的 hidden 条目归一化为精确 id 集合。
-//
+// NormalizeHiddenModels 把用户配置的 hidden 条目归一化为精确 id 集合。//
 // 条目带合法 "cn:"/"global:" 前缀 → 只隐藏该域；裸名 → 两域都隐藏。
 // 大小写敏感（与 internal/server.resolveModel 的前缀规则对称：取第一个 ":",
 // 前段恰为 "cn"/"global" 才剥离）。返回的 map 只读共享，调用方不得修改。
@@ -80,4 +99,9 @@ func NormalizeHiddenModels(hidden []string) map[string]struct{} {
 		return nil
 	}
 	return out
+}
+
+// NormalizeAllowedModels 同 NormalizeHiddenModels，用于 models.allowed 白名单。
+func NormalizeAllowedModels(allowed []string) map[string]struct{} {
+	return NormalizeHiddenModels(allowed)
 }

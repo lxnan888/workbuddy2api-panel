@@ -1,6 +1,6 @@
 // autotask.go 面板「一键完成」任务的动作实现。
 //
-// 设计依据：上游 scripts/task_*.py 实测结论 + 2026-09-12 桌面指纹协议逆向
+// 设计依据：上游 tests/scripts/task_*.py 实测结论 + 2026-09-12 桌面指纹协议逆向
 // （data/desktop-task-protocol.md）——
 //   - first_buddy（+300 分）：report（前置解锁）→ agreement → buddy/first
 //   - chat_5（+100 分）：累计 5 条 chat_request_send 上报
@@ -1276,7 +1276,7 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	}
 	// 企业上下文门控：与 accountTaskAuto 同口径（企业版 / 企业切换会话下成长任务
 	// 行为事件被上游静默丢弃，跑全量只会白耗真实对话配额）。「一键完成全部」与
-	// 单任务入口共用同一套动作，必须一并挡上（下游 fork 吸收本 PR 时发现的缺口）。
+	// 单任务入口共用同一套动作，必须一并挡上（下游 本项目 吸收本 PR 时发现的缺口）。
 	if a.IsEnterpriseSession() {
 		writeErr(w, http.StatusUnprocessableEntity,
 			"该账号为企业版/企业切换会话（token_source=enterprise_switch），无个人成长体系，成长任务行为事件会被上游忽略；请移除账号后以个人身份重新登录")

@@ -18,7 +18,7 @@
 
 ---
 
-> ### 本仓库是 fork：`lxnan888/workbuddy2api-panel`
+> ### 本仓库是 本项目：`lxnan888/workbuddy2api-panel`
 >
 > 相对上游 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)
 > （作者已于 2026-10-21 停止维护）的差异，全部已在本仓库 CI 构建并验证：
@@ -29,7 +29,7 @@
 > | **裸模型 ID 开关** | 新增 `models.bare_ids`（默认 `false`）。开启后 `GET /v1/models` 只返回裸模型名，两域同名去重（首选域在前，另一域独占的追加在后）；同时**带 `cn:` / `global:` 前缀的请求按「模型不存在」拒绝**（400 `model_unavailable`），对外命名空间只有裸名一套。 |
 > | **裸名首选域** | 新增 `pool.preferred_realm`（`cn` 默认 / `global`）。只影响不带 `cn:` / `global:` 前缀的请求先试哪个域，显式前缀永不被改写。 |
 > | **跨域回退默认开启** | `pool.cross_domain_fallback` 默认值由 `false` 改为 `true`：首选域选不到可用账号时自动换另一域再选一次。需要严格锁域时显式设为 `false`。 |
-> | **提示词配置提示修正** | `prompt.mode` / `prompt.file` / `prompt.text` 在进程启动时固化，已补进面板的「保存后需重启」清单（此前保存成功却不提示，容易误判为没生效）。 |
+> | **提示词配置热生效** | `prompt.mode` / `prompt.file` / `prompt.text` 已并入 livecfg 快照，面板保存后立即生效（仅 `state_file` 仍需重启）。 |
 > | **思考档位按实测收敛** | 上游只校验枚举值、不按模型限制档位（两域 336 次直连实测，见下文）。`normalizeReasoningEffort` 改为仅枚举校验（非法值→`high`），`max` 不再被削成 `xhigh`/`high`；`/v1/models` 的 `reasoning_supported_efforts` 统一输出实测全集。 |
 > | **单档模型自动补默认档** | 实测 `glm-5.1` 不带 `reasoning_effort` 会被上游 400 `11133`，带 `medium` 即 200。现对「合法档位恰好一个」的模型自动补档；多档模型不干预，显式关闭思考时不注入。 |
 > | **模型可用性 / 视觉 / 工具全量实测** | 两域 56 个模型逐一真请求验证（含红图颜色 + 两位数图片双重视觉验证、`get_weather` 工具调用）。结论沉淀在「思考档位」章节与 `capability_cn.csv` / `capability_gl.csv`。 |
@@ -69,7 +69,7 @@
 `max` 返回 200，且同提示词下 thinking tokens 明显高于 `high`（单样本 311 vs 200，仅供参考；
 样本噪声大，要定论需多次采样取中位数）。
 
-> **本 fork 已按上述结论改完并上线**（提交 `ebf167e`）：
+> **本 本项目 已按上述结论改完并上线**（提交 `ebf167e`）：
 > `normalizeReasoningEffort` 只做枚举合法性校验（非法值 → `high`），不再按模型目录降级，
 > `max` 原样出站；`/v1/models` 的 `reasoning_supported_efforts` 统一输出实测全集
 > `minimal/low/medium/high/xhigh/max`（`off` 两域实测均 400，不列入）。
@@ -93,7 +93,7 @@
 >
 > **维护方式披露**：本仓库近期的 issue / PR 处置、代码审查、测试与修复实现**大量由 AI 辅助完成**（自动化编码 agent），合并与发布决策由维护者作出。请知悉后再使用或参与贡献。
 
-> **本项目是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支**（fork）。
+> **本项目是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支**（本项目）。
 > 上游仓库现已删除；本项目**已同步至上游删库前的最后一次更新**（`ea8b1e5`），此后由本分支独立维护演进。
 > 在上游基础上重构了可视化运维层；差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，详见下文。
 
@@ -134,13 +134,13 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 |---|---|
 | 🔑 **OAuth 一键登录** | `login.sh` 设备授权流程，自动落盘凭证并重启容器加载新账号 |
 | 🔄 **多账号池** | 快过期积分加权 + 成本分层 + 加权随机选号，Top-5 候选 + 防惊群 |
-| 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
+| 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、并发租约限流 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点），四类独立开关 |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | DeepSeek 思维链注入（`thinking.type=enabled` + 默认档）、`reasoning_content` 多轮回填、effort 档位自动降级 |
-| 🔍 **联网搜索** | `POST /v1/search/messages` 把上游 `/agenttool/v1/search` 包成 Anthropic Messages 兼容形态（DSH 等客户端的搜索 provider 零改动接入）；复用账号池选号 / 在途租约 / token 刷新 / 错误冷却，出站请求头对齐官方客户端 |
-| 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的内容误报；`passthrough` 遇拦截自动降级重试 |
+| 🔍 **联网搜索** | `POST /v1/search/messages` 把上游 `/agenttool/v1/search` 包成 Anthropic Messages 兼容形态（DSH 等客户端的搜索 provider 零改动接入）；复用账号池选号 / 并发租约 / token 刷新 / 错误冷却，出站请求头对齐官方客户端 |
+| 💬 **系统提示词体系** | 默认 `passthrough`：保留客户端 system，仅补齐渠道要求的行为约定；`custom` 可替换为网关自有提示词，`append` 可追加；内容拦截时按既有中性提示词降级重试 |
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭），与提示词体系两层叠加 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
@@ -235,7 +235,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **Web 管理面板** | `internal/panel`，前端 go:embed 单文件进二进制，零外部依赖。账号池可视化（健康色条 / 积分量条 / 冷却倒计时）、积分到期分布、单号运维、批量任务、日志查看、明暗主题 |
 | **请求指标与脱敏日志** | 面板展示完成成功率 / HTTP 成功率 / 平均耗时 / 最近请求，响应带 `X-Request-Id`；JSONL 只归档请求元数据，不写提示词、响应正文或凭证 |
 | **浏览器内 OAuth 添加账号** | 面板「添加账号」按钮完成设备授权 → 凭证落盘 → **热加载进池（免重启）**，替代命令行 `login.sh` 流程 |
-| **在线配置编辑（热生效）** | 面板直接改 `config.json`：API 密钥 / `soft_rate` / 脱敏开关 / 池参数 / 任务排程**立即生效**；装配期字段（listen 等）保存后提示需重启。写入采用深合并 + 原子替换，保留未知键 |
+| **在线配置编辑（热生效）** | 面板直接改 `config.json`：API 密钥 / 提示词 / 超时 / UA / 上游 base / 脱敏开关 / 池参数 / 并发等待 / 任务排程**立即生效**；`listen`、`auth_dir`、`read_timeout`、`upstash`、会话粘性、日志归档也支持进程内热切换，仅 `state_file` 保存后提示重启。写入采用深合并 + 原子替换，保留未知键 |
+| **每账号并发** | 默认国内 3 / 国际 2；账号表「并发」列显示 当前/上限，点击可单独设置（1–64，0 = 按域默认），写入 `state.json` 实时生效。并发满自动换号；全部满时按 `pool.concurrency_wait_timeout`（默认 30s）等待，排队超过 `pool.concurrency_wait_queue`（默认 100）回 429 `gateway_queue_full`，等待超时回 429 `gateway_concurrency_limit`，完全没号回 503 |
 | **积分任务体系** | 任务列表 / 接受 / 领取接口 + 面板弹窗；「一键完成」覆盖 **17 个任务**（对话 / 领养 / 桌面行为链 / 模板 / 灵感案例 / 画布 / 专家召唤 / 技能尝鲜 / 主题 / 资料库 / 夜猫子等），推进进度、等待异步计分落定后**自动领奖**，纯 API 零客户端依赖 |
 | **限时补偿可观测（issue #189）** | 官方补偿（例：「模型服务异常额外补偿 500 积分」）在账号侧可见，网关改为**先查 `compensation-status` 再决定是否领**：面板「官方补偿」卡片列出待领账号 + 领取截止倒计时（≤48h 标红）+ 逐号/全量领取按钮；**查询失败的账号在卡片上显形为红色行，不会与「没有补偿」混为一谈**；每日签到排程同步走「查→领」，**状态查询失败与领取失败一律显式告警**（旧实现把「没有 / 已领 / 领取失败」三态压成同一形态，带截止日的补偿会静默过期） |
 | **首启自动生成配置** | 目录下无 `config.json` 时自动生成推荐配置（含 `crypto/rand` 随机 `api_key`），双击即开 |
@@ -248,7 +249,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 ### 同步上游
 
-**第一轮（fork 基线 `53ee3a1` → `9a87758`，34 个提交）**：四类任务独立排程、pool 文件拆分、12153 连续计数才禁用、429 `code=6004` 模型级限流收窄、11101 不罚号、请求体 413、DeepSeek 思维链、reasoning_content 回填、Codex 指纹脱敏、系统提示词体系、出站 UA 可配等。
+**第一轮（本项目 基线 `53ee3a1` → `9a87758`，34 个提交）**：四类任务独立排程、pool 文件拆分、12153 连续计数才禁用、429 `code=6004` 模型级限流收窄、11101 不罚号、请求体 413、DeepSeek 思维链、reasoning_content 回填、Codex 指纹脱敏、系统提示词体系、出站 UA 可配等。
 
 **第二轮（`9a87758` → `ea8b1e5`，2026-09-14，只吸收底层）**：
 
@@ -319,7 +320,7 @@ curl -s http://localhost:7863/healthz
 
 > **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `wb2api-panel` →
 > Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
-> 本 fork 的 `wb2api-panel` 已是公开包，可直接匿名 `docker pull`。
+> 本 本项目 的 `wb2api-panel` 已是公开包，可直接匿名 `docker pull`。
 >
 > 镜像 tag 规则：`main` 分支推送 `latest` / `main` / `sha-xxxxxx`；打 `v*` tag 额外发布
 > `1.2.3` / `1.2` / `1` 语义化版本；PR 仅构建验证、不推送。
@@ -448,7 +449,7 @@ curl -s http://localhost:7863/v1/search/messages \
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `dns_servers` | 空 | **出站解析**用的 DNS 服务器（数组，按顺序试，都用不上才报错）；空 = 系统解析器。/etc/resolv.conf 不存在或不可用的环境（Android、精简容器）必须显式配，否则 Go 解析器会退回 `127.0.0.1:53`，查任何域名都变成"连本机 53 端口"（`dial tcp: lookup ... on [::1]:53: connection refused`）。只换 `Transport.DialContext`，不动超时与连接池 |
-| `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
+| `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；保存后进程内重建监听（#100） |
 | `panel.package_detail_limit` | `5` | 积分构成页单账号默认展示的最早到期包数；其余未用完包与已用完包聚合折叠 |
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
 | `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |
@@ -473,16 +474,17 @@ curl -s http://localhost:7863/v1/search/messages \
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `models.hidden` | `[]` | 模型黑名单：不对外暴露的模型。裸名=两域都藏；`"cn:xxx"`/`"global:xxx"`=只藏该域。`GET /v1/models` 列表过滤 + `POST /v1/chat/completions` 点名拒绝（400 `model_unavailable`）。面板保存后热生效 |
 | `models.bare_ids` | `false` | `/v1/models` 是否只暴露裸模型名。关闭=返回 `cn:xxx`/`global:xxx`（现状）；开启=裸 ID，两域同名只出一条（首选域在前，另一域独占的追加在后）。**开启后带 `cn:` / `global:` 前缀的请求按「模型不存在」拒绝**（400 `model_unavailable`），对外命名空间只有裸名一套。路由由 `pool.preferred_realm` + `pool.cross_domain_fallback` 决定。面板可改，立即生效 |
-| `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
+| `prompt.mode` | `passthrough` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
 | `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（约 2KB）；路径非空但不可读 → 启动报错 |
 | `upstash.url` / `upstash.token` | 空 | 空 = 纯内存模式（Noop 降级，功能照常） |
-| `pool.max_in_flight` | `3` | 单账号最大在途请求数（`0` = 不限） |
-| `pool.max_in_flight_global` | `2` | global 域单账号在途上限（国际版 WAF 风控更紧，压低并发） |
+| `pool.concurrency_wait_timeout` | `30s` | 全部账号并发满时的最长等待时长；超时回 429 `gateway_concurrency_limit` |
+| `pool.concurrency_wait_queue` | `100` | 并发满时允许排队的请求上限；超过回 429 `gateway_queue_full` |
+| 每账号并发 | 国内 3 / 国际 2 | 账号表点击「并发」单独设置（1–64；0 = 按域默认），写入 `state.json`，实时生效；并发满自动换号，全部满才等待/报错 |
 | `pool.degrade_threshold` | `5` | 连败降权阈值：未知错误（ErrClient/传输层）连败 N 次临时出池 |
 | `pool.degrade_cooldown` / `pool.degrade_cooldown_max` | `10m` / `2h` | 连败降权时长与上限钳制 |
 | `pool.cost_explore_interval` | `30m` | costTier 条件探索窗口：免费层垄断且存在未知号时，每窗口把一个真实请求搭车改道给未知号（零新增上游请求；成功即毕业，失败走既有错误策略）。`0` = 关停 |
 | `pool.credit_floor` | `100` | **积分保底**：账号余额低于该值时，对**实测收费**模型（tier 2，账本 6h 内有效观测）不再参与选号——防止收费模型把余额打穿、连免费模型都 402 冷却到次日签到（最坏约 11.5 小时不可用）。tier 0（实测免费）/ tier 1（无观测）**不受限**：保底保的是「留余额给免费模型用」，且 tier 1 若拦会让账本过期 / 重启清零的触底号死锁在「学不回来」。含会话粘性路径（粘性号触底则解绑换号）。全池触底且全 tier 2 时选号返回空（网关回 503），**不放行**。签到回血越过 floor 即刻自动恢复。`0` = 关闭 |
-| `pool.cross_domain_fallback` | `true` | **裸模型名跨域回退**（issue #135）：开启后，请求 `model` 不带 `cn:` / `global:` 前缀时不再等价于 `cn:<模型>`——首选域（cn）选不到可用号（账号级冷却/熔断/在途占满，或该域账号对这个模型 11102 后被模型级负缓存避开）会自动改用另一域再选一次，客户端只写一个模型名即可跟随账号池切换。显式 `cn:` / `global:` 前缀**永不回退**（写哪个域就用哪个域）。跨域会消耗另一个域的额度，本 fork 默认开启；需要严格锁域时关掉即可 |
+| `pool.cross_domain_fallback` | `true` | **裸模型名跨域回退**（issue #135）：开启后，请求 `model` 不带 `cn:` / `global:` 前缀时不再等价于 `cn:<模型>`——首选域（cn）选不到可用号（账号级冷却/熔断/并发占满，或该域账号对这个模型 11102 后被模型级负缓存避开）会自动改用另一域再选一次，客户端只写一个模型名即可跟随账号池切换。显式 `cn:` / `global:` 前缀**永不回退**（写哪个域就用哪个域）。跨域会消耗另一个域的额度，本 本项目 默认开启；需要严格锁域时关掉即可 |
 | `pool.preferred_realm` | `cn` | 裸模型名的首选域：`cn` 国内优先 / `global` 国际优先。只影响不带前缀的请求先试哪个域；显式 `cn:` / `global:` 永不改写。与 `cross_domain_fallback` 配合：首选域选不到号时是否换域由后者决定。面板可改，立即生效 |
 | `pool.breaker_threshold` | `3` | 连续失败触发熔断阈值 |
 | `pool.breaker_cooldown` | `30m` | 熔断基础退避时长 |
@@ -525,11 +527,11 @@ curl -s http://localhost:7863/v1/search/messages \
 
 | 模式 | 语义 |
 |---|---|
-| `custom`（默认） | 出站前用网关自有提示词**替换**客户端 system / developer 消息（删除全部 system / developer，头部插入单条 system）；user / assistant / tool 消息逐字不动 |
-| `append` | 开头连续 system / developer 块之后**插入**一条网关自有 system，既有消息（含客户端项目规范/工具约定）逐字不动——两者并用；降级期退化为 replace（带指纹原文重试只会确定性再撞 400） |
-| `passthrough` | 透传客户端原始 system，不做改写 |
+| `passthrough`（默认） | 保留客户端 system；仅当首条消息不是 system 时，在最前面补一条行为约定 `Follow the user's instructions and respond in the user's language.`，以通过上游通道校验。`passthrough` 不是字节级透传：出站管线仍会做角色归一、工具配对、推理档位、限额与指纹脱敏等必要适配 |
+| `custom` | 出站前用网关自有提示词**替换**客户端 system / developer 消息（删除全部 system / developer，头部插入单条 system）；user / assistant / tool 消息逐字不动，客户端项目规范/工具约定会丢失 |
+| `append` | 开头连续 system / developer 块之后**插入**一条网关自有 system，既有消息（含客户端项目规范/工具约定）逐字不动——两者并用；降级期退化为 replace |
 
-内置默认提示词约 2KB（`internal/prompt/defaultprompt.md`，嵌入二进制）。`prompt.file` 指向自定义提示词文件（自定义人格 / 人设）即整体替换内置默认；**留空 = 内置默认**，路径非空但不可读 → **启动报错**（fail fast，不会静默回落到内置默认）。
+内置默认提示词约 2KB（`internal/prompt/defaultprompt.md`，嵌入二进制）。`prompt.file` 只在 `custom` / `append` 生效；`passthrough` 不加载提示词文件。路径非空但不可读 → **启动报错**（fail fast，不会静默回落到内置默认）。
 
 ### 内容拦截误报与降级重试
 
@@ -596,7 +598,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 
 ### 选号策略
 
-1. 过滤：禁用 / 冷却 / 熔断 / 在途占满账号不参与
+1. 过滤：禁用 / 冷却 / 熔断 / 并发占满账号不参与
 2. 按模型实测成本分层，只保留当前最优层
 3. 默认开启快过期积分加权（软偏好，不改排序）：
 
@@ -695,7 +697,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 - `conversationId` 由网关生成（`wb2api-<ms>`），无需真实会话
 - 限速：账号间间隔 800ms（与旅行同口径）
 - **streak 自检**：上报成功后回读连登天数（只读 oracle），日志每号一行可 grep：`activity <uid>: streak days=N`。`days=0` 记 **warn**（`report OK but streak.days=0 (silent drop?)`，对应上游「200 但静默丢弃」）；回读失败记 warn 但不影响主流程（上报按天幂等，不重试，只观测）
-- 手动诊断 / 补跑用 `python3 scripts/probe_active.py`（只读探测；写操作默认 dry-run，需 `--yes`）
+- 手动诊断 / 补跑用 `python3 tests/scripts/probe_active.py`（只读探测；写操作默认 dry-run，需 `--yes`）
 
 #### 猫猫旅行（独立排程）
 
@@ -721,7 +723,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 `${baseURL}/messages` 发起搜索的客户端（如 DSH 的 `web-search-deepseek`）只需把搜索
 baseURL 指向 `<网关>/v1/search`，即可零代码接入本网关的搜索能力。
 
-与 chat 共享同一套账号池语义：选号轮转、在途租约、token 临近过期自动刷新、失败按错误
+与 chat 共享同一套账号池语义：选号轮转、并发租约、token 临近过期自动刷新、失败按错误
 类型冷却或熔断。
 
 **为什么不用 `/v1/messages`**：那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发；
@@ -792,11 +794,12 @@ http://127.0.0.1:7863/panel/
 ```
 
 鉴权与 API 同口径：`api_key` 非空时面板要求输入一次密钥（浏览器 localStorage 记住）；为空则直接可用。
-界面支持**明暗主题切换**（首次跟随系统偏好，点击按钮两态翻转并记住选择），左侧导航七个视图：
+界面支持**明暗主题切换**（首次跟随系统偏好，点击按钮两态翻转并记住选择），左侧导航包含账号池、代理池、用量、积分构成、任务中心、模型与档位、配置、运行日志等视图：
 
 | 视图 | 功能 |
 |---|---|
-| **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、积分量条、成功·失败计数、在途、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
+| **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、账号名内联编辑（写回 `auths/*.json`）、出口下拉（随机 / 直连 / 固定代理）、积分量条、成功·失败计数、并发、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
+| **代理池** | 总代理（容器级出口）配置与测试；代理批量导入、输入框预测试、编辑/启用/删除、单条检测与全部检测；代理表显示协议、脱敏地址、状态、延迟、最近检测、错误、绑定数；realm 默认出口与健康检查 URL/间隔/超时/阈值设置；账号池每行可单独指定出口，一个固定代理可服务多个账号 |
 | **用量** | 指标卡（请求数 / 总 token / prompt / completion / 失败尝试 / 平均延迟，含占比与吐字速率）+ **Token 时序图**（渐变堆叠柱、均值参考线、峰值标注、悬停看单桶明细）+ **用量明细**（按账号 / 按模型 / 按域切换，可按合计 Token / 请求数 / 失败数 / 平均延迟排序，含 prompt·completion 占比条）+ **积分扣除历史**（按账号 / 按模型，折算「积分 / 1M Token」） |
 | **积分构成** | **积分到期分布**（按批次到期日聚合，颜色区分账号）+ **账号对比**（按来源归并的面额 / 余额 / 包数卡片与混合构成条）+ 逐包明细（按到期日排序，默认展开最近到期的 `panel.package_detail_limit` 个，其余与已用完的包折叠） |
 | **任务中心** | 成长任务队列：一键扫描全部账号待办 → 按账号排队执行（账号内串行，账号间可选并发 1-3），进度实时更新；另含开学季券码查询。详见 [任务中心](#-任务中心面板新视图) |
@@ -805,6 +808,34 @@ http://127.0.0.1:7863/panel/
 | **运行日志** | **请求记录表**（时间 / 结果 / 模型 / 账号 / **来源 IP** / **User-Agent** / 耗时 / Token / 积分 / 请求 ID），支持按 IP·UA·模型·账号·请求 ID 与结果筛选、读取条数、时间范围；下方 **运行日志** 按「任务 / 对话 / 系统」分频道，可开关自动滚动；新增 **积分历史**（每次真实查到余额与上次比对，变动即留痕） |
 
 顶部另有「刷新」（向上游全量查询真实余额并回写；5 秒自动轮询只读内存，不打上游）与「添加账号」（浏览器内完成 OAuth 设备授权：显示授权链接 + 自动轮询，登录后凭证落盘并**热加载进池，免重启**，也支持导入 cockpit tools 导出的 JSON）。
+
+### 代理池与总代理
+
+代理池页面提供容器级总代理、每账号出口绑定、realm 默认出口、健康检查和真实 GET 测试。代理配置保存在 `data/proxy-pool.json`（权限 `0600`），不写 `config.json`；面板读取时始终隐藏代理密码，只显示 `password_set`。
+
+支持以下输入格式（占位符示例，不含真实凭据）：
+
+| 格式 | 示例 |
+|---|---|
+| URL（可带或不带账号密码） | `http://user:pass@host:port`、`http://host:port`、`https://user:pass@host:port`、`socks5://user:pass@host:port`、`socks5h://host:port` |
+| `host:port:user:pass` | `proxy.example:8080:alice:secret` |
+| `user:pass@host:port` | `alice:secret@proxy.example:8080` |
+| `host:port@user:pass` | `proxy.example:8080@alice:secret` |
+| `host:port` | `proxy.example:8080` |
+
+无 scheme 的输入默认按 HTTP 代理解析，`socks5` / `socks5h` 必须显式写协议。导入支持空行与 `#` 注释；重复地址按规范化 URL 去重；path / query / fragment 会拒绝。
+
+出口优先级：
+
+1. 账号显式 `direct` → 完全绕过总代理与代理池；
+2. 账号显式 `fixed` → 固定使用该池代理，节点不可用时报错而非静默直连；
+3. 账号显式 `random` 或没有账号绑定但有 realm 默认 → 按绑定选择；
+4. 没有池代理可用时，启用中的总代理作为账号出站兜底；
+5. 都没有 → 直连。
+
+启用总代理后，账号流量和代理池节点连接按 **本地 → 总代理 → 池代理 → 上游** 链式转发；健康检查、输入框代理测试、总代理测试、模型目录与更新检查等网关自身请求也会经总代理。直连和固定节点不可用不会静默改走总代理，避免出口 IP 发生不可预期变化。
+
+每条代理可单独测试，也可全部一起测试；输入框中的代理可先测试再导入；总代理也有独立测试。测试默认对 `https://www.workbuddy.cn/` 发起真实 GET（健康检查 URL 可在页面修改），验证 DNS、TCP、代理握手、认证、TLS 与 HTTP 全链路；返回成功状态、延迟和错误。失败达到阈值后节点临时剔除，主动探测成功恢复；WAF 命中的出口会被单独屏蔽，随机池自动选择其他出口。
 
 ### 手机端（≤760px）
 
@@ -831,10 +862,11 @@ http://127.0.0.1:7863/panel/
 
 来源信息比 token 计数敏感（IP 属个人信息），因此由 `logging.request_client_info` 控制，**缺省开启、热生效、面板「配置 → 日志」可关**；关闭后归档与面板都不再出现来源字段（老归档里没有该字段的条目显示 `—`）。
 
-**配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
-`models.hidden`、`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
-涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`）
-保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
+**配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.*`、`models.*`、`prompt.*`、
+`upstream.*`（超时/UA/base/device token）、`server.read_timeout`、`server.max_payload_bytes`、
+`upstream.restriction_hold_seconds`、`listen`、`auth_dir`、`upstash`、`session_sticky.*`、
+`logging.request_archive_*`、`pool.*`（熔断/并发等待/权重）、`schedule.*` **立即生效，无需重启**；
+仅 `state_file` 保存后提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
 用户手写的未知键与其余字段原样保留。
 
 ### 面板接口（`/panel/api/*`）
@@ -843,8 +875,9 @@ http://127.0.0.1:7863/panel/
 
 | 分组 | 端点 |
 |---|---|
-| 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
-| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
+| 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET proxies` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
+| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove` · `nickname`；`PUT accounts/{uid}/proxy`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
+| 代理池 | `POST proxies`（导入）· `POST proxies/test`（输入预测试）· `POST proxies/check`（全部检测）· `POST proxies/{id}/check`（单条检测）· `PUT proxies/global` · `POST proxies/global/check` · `PATCH/DELETE proxies/{id}` · `PUT proxies/health` · `PUT proxies/realm/{realm}` |
 | 补偿 | `GET compensation`（逐号查补偿状态，**只读**）；`POST accounts/{uid}/compensation`（单号领）；`POST compensation_all`（全量领，返回 `summary{claimed,skipped,errored,credit}`——**先看 `errored` 再看 `claimed`**，否则会把「全部查询失败」说成「没有待领补偿」） |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
@@ -864,7 +897,7 @@ http://127.0.0.1:7863/panel/
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
-| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
+| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/并发/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
@@ -957,7 +990,7 @@ http://127.0.0.1:7863/panel/
 
 多阶段镜像（`golang:1.23-alpine` 构建 → `alpine:3.20` 运行）一次编译全部四个二进制并随镜像分发：
 
-- **wb2api**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
+- **wb2api**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `tests/scripts/probe_active.py`）
 - 以 `app` 用户（uid 10001）运行，`app/auths` 与 `app/data` 预建
 - 镜像内默认落 `config.example.json` 作为空配置（不含密钥），生产用挂载卷覆盖 `/app/config.json`
 - 内置 `HEALTHCHECK`（`wget /healthz`，30s 间隔）
@@ -971,10 +1004,23 @@ http://127.0.0.1:7863/panel/
 | `./login.sh` | OAuth 登录 → 落盘 auth → 重启容器 |
 | `./signin.sh [auths_dir]` | 批量签到（过期先刷新） |
 | `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON） |
-| `python3 scripts/probe_active.py` | 活跃上报手动诊断 / 补跑（probe=只读 / report=单号上报 / unlock=单号领猫 / ALL=全池；写操作默认 dry-run，需 `--yes`） |
-| `python3 scripts/probe_max_tokens.py` | 探测各模型**真实输出上限**（区分静默钳制与模型主动收尾），`--panel-out` 结果可直接进面板展示（见下节） |
+| `python3 tests/scripts/probe_active.py` | 活跃上报手动诊断 / 补跑（probe=只读 / report=单号上报 / unlock=单号领猫 / ALL=全池；写操作默认 dry-run，需 `--yes`） |
+| `python3 tests/scripts/probe_max_tokens.py` | 探测各模型**真实输出上限**（区分静默钳制与模型主动收尾），`--panel-out` 结果可直接进面板展示（见下节） |
 
 二进制不在 git 中：脚本首次使用自动 `go build` 对应 `cmd/*`（Docker 镜像内已预编译）。
+
+### 测试与验证脚本
+
+所有测试与验证脚本统一放在 `tests/`，不放入前后端源码目录，脚本内不保存账号、token、代理口令等敏感信息：
+
+| 路径 | 用途 |
+|---|---|
+| `tests/run.sh` | Go 测试入口：`go`（全量测试）/ `unit`（定向包）/ `vet` / `race` / `build` / `example`（校验示例配置） |
+| `tests/internal/...`、`tests/cmd/...` | Go 单测与 `testdata` 的镜像目录；运行时由 `tests/run.sh` 注入临时源码副本执行，源码目录不保留 `*_test.go` |
+| `tests/smoke.sh [端口]` | 本地冒烟：临时目录 + 空账号池启动网关，校验 `/healthz` 与 `/status` 的 `rate_limit` / `credit_burn` 字段 |
+| `tests/scripts/probe_active.py` 等 | 活跃上报、任务补跑、模型上限探测等手动诊断脚本（写操作默认 dry-run，需 `--yes`） |
+
+`probe_*` / `task_*` 脚本默认从项目根 `auths/` 读取账号，可用环境变量 `WB2A_AUTHS=/path/to/auths` 覆盖；脚本只读取本地文件，不内置任何凭证。
 
 ### 探测模型真实输出上限
 
@@ -990,7 +1036,7 @@ http://127.0.0.1:7863/panel/
 
 ```bash
 # 在网关所在机器上（探测会真实消耗积分；单模型预算默认 600s，并行 4）
-python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-xxx   --panel-out data/output_probes.json
+python3 tests/scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key YOUR_API_KEY   --panel-out data/output_probes.json
 
 # 断点续测 / 只测指定模型 / 预览计划
 ... --resume
@@ -1081,7 +1127,7 @@ sudo chown -R 10001:10001 ./auths ./data ./config.json
 
 ### 系统提示词被内容策略误杀怎么办？
 
-默认 `prompt.mode=custom` 已用网关自有提示词替换客户端 system，从源头消除大部分误报；用户 / assistant 消息中的指纹串由 `features.sanitize_blacklist_fingerprints` 清洗，两层叠加。`passthrough` 模式下首遇拦截会自动换 Degraded 中性提示词同请求重试一次。
+默认 `prompt.mode=passthrough` 保留客户端 system，仅补齐首条 system 渠道兜底；用户 / assistant 消息中的指纹串由 `features.sanitize_blacklist_fingerprints` 清洗。`passthrough` 模式下首遇内容拦截会自动换 Degraded 中性提示词同请求重试一次，降级状态维持到次日 00:00 CST。
 
 ### 如何让官网「使用端」列显示为 WorkBuddy？
 
@@ -1091,7 +1137,7 @@ sudo chown -R 10001:10001 ./auths ./data ./config.json
 
 | 断言 | 出处 |
 |---|---|
-| `prompt.mode` 默认 `custom` | `cmd/server/config.go:148` |
+| `prompt.mode` 默认 `passthrough` | `cmd/server/config.go:148` |
 | 请求体无网关侧上限（max_body_mb 已移除） | `internal/server/handler.go` chatCompletions 读 body 段 |
 | 出站强制 `stream:true` | `internal/upstream/payload.go:28` |
 | DeepSeek 思维链注入（`thinking.type=enabled`） | `internal/upstream/thinking.go:110` |
@@ -1145,10 +1191,10 @@ sudo chown -R 10001:10001 ./auths ./data ./config.json
 ```
 
 - **加权随机**：保留原有成本分层、Top5 加权、闲置补偿和快过期积分权重。旧配置缺少策略时，两域均使用此默认值。
-- **轮询**：在当前最优成本层的全部可用账号之间按顺序轮换，不截断 Top5。跳过禁用、暂停、对应模型冷却、积分保底拦截及在途占满的账号。
-- **顺序耗尽**：持续使用当前账号，直到对应模型冷却、账号不可用、积分保底拦截或成本层优先级变化，再向后切换。恢复的早序账号不会抢占仍可用的当前账号，后续轮转可再次使用。请求级重试和在途占满可暂用其他账号，但不推进主账号；普通失败仍按现有熔断规则处理。
+- **轮询**：在当前最优成本层的全部可用账号之间按顺序轮换，不截断 Top5。跳过禁用、暂停、对应模型冷却、积分保底拦截及并发占满的账号。
+- **顺序耗尽**：持续使用当前账号，直到对应模型冷却、账号不可用、积分保底拦截或成本层优先级变化，再向后切换。恢复的早序账号不会抢占仍可用的当前账号，后续轮转可再次使用。请求级重试和并发占满可暂用其他账号，但不推进主账号；普通失败仍按现有熔断规则处理。
 
-两种有序策略仍遵守会话粘性和成本探索，轮询指针 / 顺序耗尽主账号按 `(realm, model)` 独立维护，通过既有本地状态与 Redis 快照机制恢复。全部候选冷却时返回无可用账号，等待既有恢复机制，不提前试探冷却账号；加权随机继续保留原有全冷却兜底。选号和指针更新持池锁，在途租约仍由既有 Acquire/Release 保证。
+两种有序策略仍遵守会话粘性和成本探索，轮询指针 / 顺序耗尽主账号按 `(realm, model)` 独立维护，通过既有本地状态与 Redis 快照机制恢复。全部候选冷却时返回无可用账号，等待既有恢复机制，不提前试探冷却账号；加权随机继续保留原有全冷却兜底。选号和指针更新持池锁，并发租约仍由既有 Acquire/Release 保证。
 
 Web 面板「账号池与流量治理」可分别配置策略和账号顺序，保存后热生效。闲置补偿与快过期积分加权仅影响加权随机。无地区上下文的旧 Pool 入口保留原行为；策略不会改变路由或自动跨地区借号。
 

@@ -1,12 +1,13 @@
 'use strict';
 /* ── 状态 ─────────────────────────────────────────────────────────── */
 const LS_KEY = 'wb2api.key', LS_THEME = 'wb2api.theme';
-/* 账号备注与「积分到期提醒」折叠的本机键（同上：模块级声明放顶部，避开 TDZ）。 */
-const LS_REMARKS = 'wb2api.remarks.v1', LS_EXP_FOLD = 'wb2api.expfold.v1';
-let remarksCache = null;
+/* 「积分到期提醒」折叠的本机键（模块级声明放顶部，避开 TDZ）。 */
+const LS_EXP_FOLD = 'wb2api.expfold.v1';
 let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
+/* 代理池视图状态：代理快照、编辑中的代理、正在内联改名的账号。 */
+let proxyData = null, proxyLoading = false, proxyEditID = '', editingNameUID = '', editingConcUID = '';
 let logPin = true, loginState = null, loginTimer = null;
 let refTimer = null;
 /* 视图级筛选状态（模块级声明放在文件顶部，避免顶层 go() 早于声明执行时踩 TDZ）。 */
@@ -354,7 +355,7 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', proxies: '代理池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -362,13 +363,14 @@ function go(v) {
   $('ttl').textContent = TITLES[v];
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'config') loadConfig();
+  if (v === 'proxies') loadProxies();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
   // 完整逐包明细由卡片上的「检查」按钮显式触发（loadPackages/loadExpiry）。
-  if (v === 'taskscenter') reattachQueueView();
+  if (v === 'taskscenter') { reattachQueueView(); loadTaskJobs(); }
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 /* 首次进入延到本轮脚本求值之后再 go()。
@@ -385,8 +387,10 @@ setTimeout(() => {
 /* ── 账号池 ───────────────────────────────────────────────────────── */
 function renderAccounts(list) {
   const tb = $('accBody');
+  // 内联改名/改并发期间不让 5 秒轮询重建表格（否则输入框会被冲掉）。
+  if (editingNameUID || editingConcUID) return;
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
@@ -403,7 +407,7 @@ function renderAccounts(list) {
       const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
-    } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
+    } else tag = '<span class="tag ok">可用</span>';
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
@@ -439,11 +443,12 @@ function renderAccounts(list) {
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
-      '<td class="who"><div class="nm">' + remarkName(s.uid, s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td class="who"><div class="nm" data-uid="' + esc(s.uid) + '" data-name="' + esc(s.nickname || '') + '" title="点击修改账号名（写回 auth 文件）">' + remarkName(s.uid, s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td class="proxy-cell">' + accountProxyHTML(s.uid, s.realm) + '</td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
-      '<td class="num">' + (s.in_flight || 0) + '</td>' +
+      '<td class="num conc" data-uid="' + esc(s.uid) + '" data-override="' + (s.concurrency_override || 0) + '" data-limit="' + (s.concurrency_limit || 0) + '" title="点击修改并发（当前/上限；0 = 按域默认）">' + (s.concurrency || 0) + ' / ' + (s.concurrency_limit || 0) + '</td>' +
       '<td class="num usage-cell" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +
         '<span class="usage-item usage-count"><b>' + req + '</b><em>次</em></span>' +
         '<span class="usage-item usage-total"><b>' + totalTok + '</b>' + totalTokUnit + '</span>' +
@@ -525,7 +530,7 @@ async function loadOverview(quiet) {
     $('navState').textContent = d.healthy > 0 ? '服务正常' : (d.total ? '无可用账号' : '待添加账号');
     const p = $('navPulse');
     p.className = 'pulse' + (d.healthy > 0 ? '' : (d.total ? ' warn' : ' bad'));
-    $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
+    $('accNote').textContent = d.concurrency_full ? d.concurrency_full + ' 个账号并发已满' : '';
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
     renderAccounts(d.accounts || []);
@@ -537,6 +542,384 @@ async function loadOverview(quiet) {
     if ($('expBox') && !liveFresh) renderExpirySnapshot(d);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
+
+/* ── 代理池 ───────────────────────────────────────────────────────── */
+function proxySnapshot() {
+  return proxyData || (overviewData && overviewData.proxy_pool) || null;
+}
+function proxyBindingOf(uid) {
+  const s = proxySnapshot();
+  return (s && s.bindings && s.bindings[uid]) || null;
+}
+function bindingFromValue(v) {
+  if (v === 'direct') return { mode: 'direct' };
+  if (v && v.startsWith('fixed:')) return { mode: 'fixed', proxy_id: v.slice(6) };
+  return { mode: 'random' };
+}
+function proxyValueOf(b) {
+  if (!b || b.mode === 'random') return 'random';
+  if (b.mode === 'direct') return 'direct';
+  return 'fixed:' + (b.proxy_id || '');
+}
+function proxyOptionsHTML(binding, includeAll) {
+  const s = proxySnapshot();
+  const proxies = (s && s.proxies) || [];
+  const mode = binding ? binding.mode : 'random';
+  const id = binding ? binding.proxy_id : '';
+  let html = '<option value="random"' + (mode === 'random' ? ' selected' : '') + '>随机</option>' +
+    '<option value="direct"' + (mode === 'direct' ? ' selected' : '') + '>直连</option>';
+  if (mode === 'fixed') {
+    const p = proxies.find(x => x.id === id);
+    html += '<option value="fixed:' + esc(id) + '" selected>固定：' + esc(p ? p.name : String(id).slice(0, 8)) + '</option>';
+  }
+  if (includeAll) {
+    for (const p of proxies) {
+      if (mode === 'fixed' && p.id === id) continue;
+      html += '<option value="fixed:' + esc(p.id) + '">固定：' + esc(p.name || p.url) + '</option>';
+    }
+  }
+  return html;
+}
+function accountProxyHTML(uid, realm) {
+  const b = proxyBindingOf(uid);
+  return '<select class="proxy-sel" data-proxy-uid="' + esc(uid) + '" title="账号出口：随机 / 直连 / 固定代理">' +
+    proxyOptionsHTML(b, false) + '</select>';
+}
+function populateProxySelect(sel) {
+  if (!sel || sel.dataset.populated === '1') return;
+  const b = bindingFromValue(sel.value);
+  sel.innerHTML = proxyOptionsHTML(b, true);
+  sel.dataset.populated = '1';
+}
+async function saveProxyBinding(sel) {
+  const b = bindingFromValue(sel.value);
+  const uid = sel.dataset.proxyUid;
+  try {
+    if (uid) {
+      await api('accounts/' + encodeURIComponent(uid) + '/proxy', { method: 'PUT', body: JSON.stringify(b) });
+      const s = proxySnapshot();
+      if (s) {
+        s.bindings = s.bindings || {};
+        if (b.mode === 'random') delete s.bindings[uid]; else s.bindings[uid] = b;
+      }
+      toast('账号出口已更新', 'ok');
+    } else if (sel.dataset.proxyRealm) {
+      const realm = sel.dataset.proxyRealm;
+      await api('proxies/realm/' + encodeURIComponent(realm), { method: 'PUT', body: JSON.stringify(b) });
+      const s = proxySnapshot();
+      if (s) {
+        s.realms = s.realms || {};
+        if (b.mode === 'random') delete s.realms[realm]; else s.realms[realm] = b;
+      }
+      toast('realm 默认出口已更新', 'ok');
+    }
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+function proxyStatusTag(p) {
+  const map = {
+    pending: ['warn', '待检测'], healthy: ['ok', '健康'], unhealthy: ['bad', '异常'],
+    disabled: ['mute', '已停用'], blocked: ['bad', '被屏蔽'],
+  };
+  const blocked = p.blocked_until && (new Date(p.blocked_until).getTime() > Date.now());
+  const st = blocked ? ['bad', '被屏蔽'] : (map[p.status] || ['mute', p.status || '—']);
+  return '<span class="tag ' + st[0] + '">' + st[1] + '</span>' +
+    (blocked ? '<div class="hint" style="font-size:11px">至 ' + esc(fmtLocalDateTime(p.blocked_until)) + '</div>' : '');
+}
+
+async function loadProxies(quiet) {
+  if (proxyLoading) return;
+  proxyLoading = true;
+  try {
+    proxyData = await api('proxies');
+    renderProxies();
+  } catch (e) { if (!quiet) toast('读取代理池失败：' + e.message, 'err'); }
+  finally { proxyLoading = false; }
+}
+
+function renderProxies() {
+  const d = proxyData;
+  if (!d) return;
+  const g = d.global || {};
+  $('pxGlobalUrl').value = g.url || '';
+  $('pxGlobalEnabled').checked = !!g.enabled;
+  const gst = g.status === 'healthy' ? '健康' : g.status === 'unhealthy' ? '异常' : g.status === 'pending' ? '待检测' : '未启用';
+  $('pxGlobalState').textContent = g.url ? gst : '未配置';
+  $('pxGlobalNote').textContent = g.enabled
+    ? (gst + (g.latency_ms ? ' · ' + g.latency_ms + ' ms' : '') + (g.last_error ? ' · ' + g.last_error : '') + (g.password_set ? ' · 密码已设置' : ''))
+    : (g.url ? '已配置但未启用' : '');
+  const list = d.proxies || [];
+  const counts = { healthy: 0, bad: 0, pending: 0, disabled: 0 };
+  for (const p of list) {
+    if (p.status === 'healthy') counts.healthy++;
+    else if (p.status === 'unhealthy') counts.bad++;
+    else if (p.status === 'disabled') counts.disabled++;
+    else counts.pending++;
+  }
+  $('pxTotal').textContent = list.length;
+  $('pxHealthy').textContent = counts.healthy;
+  $('pxBad').textContent = counts.bad;
+  $('pxPending').textContent = counts.pending;
+  $('pxNote').textContent = counts.disabled ? counts.disabled + ' 个已停用' : '';
+  const tb = $('pxBody');
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty">还没有代理。点击右上角「添加 / 导入」，支持 URL 与 host:port:user:pass 等格式。</div></td></tr>';
+  } else {
+    tb.innerHTML = list.map(p => '<tr>' +
+      '<td><div class="nm">' + esc(p.name || p.url) + '</div><div class="id">' + esc(p.protocol || '') + '</div></td>' +
+      '<td><div class="id">' + esc(p.url) + '</div>' + (p.password_set ? '<div class="hint" style="font-size:11px">密码已设置</div>' : '') + '</td>' +
+      '<td>' + proxyStatusTag(p) + '</td>' +
+      '<td class="num">' + (p.latency_ms ? p.latency_ms + ' ms' : '—') + '</td>' +
+      '<td class="num" style="color:var(--ink-3)">' + (p.checked_at && p.checked_at !== '0001-01-01T00:00:00Z' ? ago(p.checked_at) : '—') + '</td>' +
+      '<td>' + (p.last_error ? '<div class="note">' + esc(p.last_error) + '</div>' : '—') + '</td>' +
+      '<td class="num">' + (p.bound_count || 0) + '</td>' +
+      '<td><input type="checkbox" data-px-toggle="' + esc(p.id) + '"' + (p.enabled ? ' checked' : '') + '></td>' +
+      '<td class="acts">' +
+        '<button class="xs ghost" data-px-a="check" data-px-id="' + esc(p.id) + '">测试</button>' +
+        '<button class="xs ghost" data-px-a="edit" data-px-id="' + esc(p.id) + '">编辑</button>' +
+        '<button class="xs ghost danger" data-px-a="delete" data-px-id="' + esc(p.id) + '">删除</button>' +
+      '</td></tr>').join('');
+  }
+  // realm 默认出口
+  $('pxRealmCn').innerHTML = proxyOptionsHTML((d.realms || {}).cn, true);
+  $('pxRealmGlobal').innerHTML = proxyOptionsHTML((d.realms || {}).global, true);
+  $('pxRealmCn').dataset.proxyRealm = 'cn';
+  $('pxRealmGlobal').dataset.proxyRealm = 'global';
+  // 健康设置
+  const h = d.health || {};
+  $('pxHealthUrl').value = h.url || '';
+  $('pxHealthInterval').value = h.interval_seconds || 60;
+  $('pxHealthTimeout').value = h.timeout_seconds || 10;
+  $('pxHealthFail').value = h.failure_threshold || 3;
+  $('pxHealthOK').value = h.success_threshold || 2;
+}
+
+function openProxyEdit(id) {
+  const d = proxyData;
+  const p = d && (d.proxies || []).find(x => x.id === id);
+  if (!p) return;
+  proxyEditID = id;
+  $('pxEditID').value = id;
+  $('pxEditName').value = p.name || '';
+  $('pxEditUrl').value = p.url || '';
+  $('pxEditPassword').value = '';
+  $('pxEditNote').textContent = p.password_set ? '当前密码已设置；留空密码输入框则保留。' : '';
+  $('pxEditVeil').classList.add('on');
+}
+async function saveProxyEdit() {
+  const id = proxyEditID;
+  if (!id) return;
+  const body = { name: $('pxEditName').value.trim(), url: $('pxEditUrl').value.trim() };
+  const pw = $('pxEditPassword').value;
+  if (pw) body.password = pw;
+  try {
+    await api('proxies/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify(body) });
+    $('pxEditVeil').classList.remove('on');
+    toast('代理已保存', 'ok');
+    loadProxies(true);
+  } catch (e) { $('pxEditNote').textContent = e.message; }
+}
+
+$('btnPxImportToggle').onclick = () => {
+  const p = $('pxImportPanel');
+  p.hidden = !p.hidden;
+};
+$('btnPxImport').onclick = async () => {
+  const lines = $('pxLines').value;
+  if (!lines.trim()) { toast('先填代理', 'err'); return; }
+  try {
+    const r = await api('proxies', { method: 'POST', body: JSON.stringify({ lines }) });
+    const rs = r.results || [];
+    $('pxImportResult').innerHTML = rs.map(x =>
+      '第 ' + x.line + ' 行：' + (x.status === 'added' ? '<span class="tag ok">已添加</span>' : x.status === 'duplicate' ? '<span class="tag warn">重复</span>' : '<span class="tag bad">无效</span>') +
+      (x.error ? ' ' + esc(x.error) : '')).join('<br>');
+    toast('导入完成：新增 ' + rs.filter(x => x.status === 'added').length + ' 条', 'ok');
+    loadProxies(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+$('btnPxTestInput').onclick = async () => {
+  const lines = $('pxLines').value.split(/\r?\n/).map(s => s.trim()).filter(s => s && !s.startsWith('#')).slice(0, 10);
+  if (!lines.length) { toast('先填代理', 'err'); return; }
+  $('pxTestNote').textContent = '测试中…';
+  const out = [];
+  for (const line of lines) {
+    try {
+      const r = await api('proxies/test', { method: 'POST', body: JSON.stringify({ url: line }) });
+      out.push((r.ok ? '✓ ' : '✗ ') + line + (r.latency_ms ? ' · ' + r.latency_ms + 'ms' : '') + (r.error ? ' · ' + r.error : ''));
+    } catch (e) { out.push('✗ ' + line + ' · ' + e.message); }
+  }
+  $('pxTestNote').textContent = '';
+  $('pxImportResult').innerHTML = out.map(esc).join('<br>');
+};
+$('btnPxCheckAll').onclick = async () => {
+  try { await api('proxies/check', { method: 'POST' }); toast('已排队检测全部代理', 'ok'); setTimeout(() => loadProxies(true), 1200); }
+  catch (e) { toast(e.message, 'err'); }
+};
+$('btnPxGlobalSave').onclick = async () => {
+  try {
+    await api('proxies/global', {
+      method: 'PUT',
+      body: JSON.stringify({ url: $('pxGlobalUrl').value.trim(), enabled: $('pxGlobalEnabled').checked }),
+    });
+    toast('总代理已保存', 'ok');
+    loadProxies(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+$('btnPxGlobalTest').onclick = async () => {
+  try { await api('proxies/global/check', { method: 'POST' }); toast('总代理检测已排队', 'ok'); setTimeout(() => loadProxies(true), 1200); }
+  catch (e) { toast(e.message, 'err'); }
+};
+$('btnPxRealmSave').onclick = async () => {
+  try {
+    const bcn = bindingFromValue($('pxRealmCn').value);
+    const bgl = bindingFromValue($('pxRealmGlobal').value);
+    await api('proxies/realm/cn', { method: 'PUT', body: JSON.stringify(bcn) });
+    await api('proxies/realm/global', { method: 'PUT', body: JSON.stringify(bgl) });
+    toast('realm 默认出口已保存', 'ok');
+    loadProxies(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+$('btnPxHealthSave').onclick = async () => {
+  const num = id => Number($(id).value || 0);
+  try {
+    await api('proxies/health', {
+      method: 'PUT',
+      body: JSON.stringify({
+        url: $('pxHealthUrl').value.trim(),
+        interval_seconds: num('pxHealthInterval'),
+        timeout_seconds: num('pxHealthTimeout'),
+        failure_threshold: num('pxHealthFail'),
+        success_threshold: num('pxHealthOK'),
+      }),
+    });
+    toast('健康检查设置已保存', 'ok');
+    loadProxies(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+$('pxBody').addEventListener('click', async ev => {
+  const b = ev.target.closest('button[data-px-a]');
+  if (!b) return;
+  const id = b.dataset.pxId, a = b.dataset.pxA;
+  if (a === 'edit') { openProxyEdit(id); return; }
+  if (a === 'delete') {
+    if (!confirm('删除该代理？若有账号或 realm 固定绑定时会被拒绝。')) return;
+    try { await api('proxies/' + encodeURIComponent(id), { method: 'DELETE' }); toast('已删除', 'ok'); loadProxies(true); }
+    catch (e) { toast(e.message, 'err'); }
+    return;
+  }
+  if (a === 'check') {
+    try { await api('proxies/' + encodeURIComponent(id) + '/check', { method: 'POST' }); toast('已排队检测', 'ok'); setTimeout(() => loadProxies(true), 1200); }
+    catch (e) { toast(e.message, 'err'); }
+  }
+});
+$('pxBody').addEventListener('change', async ev => {
+  const cb = ev.target.closest('input[data-px-toggle]');
+  if (!cb) return;
+  try {
+    await api('proxies/' + encodeURIComponent(cb.dataset.pxToggle), { method: 'PATCH', body: JSON.stringify({ enabled: cb.checked }) });
+    toast(cb.checked ? '已启用' : '已停用', 'ok');
+    loadProxies(true);
+  } catch (e) { toast(e.message, 'err'); cb.checked = !cb.checked; }
+});
+$('pxEditClose').onclick = () => $('pxEditVeil').classList.remove('on');
+$('pxEditSave').onclick = saveProxyEdit;
+$('pxEditTest').onclick = async () => {
+  if (!proxyEditID) return;
+  try { await api('proxies/' + encodeURIComponent(proxyEditID) + '/check', { method: 'POST' }); toast('已排队检测（保存前的修改需先保存）', 'ok'); }
+  catch (e) { $('pxEditNote').textContent = e.message; }
+};
+
+/* 账号表：出口下拉 + 内联改名 */
+$('accBody').addEventListener('focusin', ev => {
+  const sel = ev.target.closest('select[data-proxy-uid]');
+  if (sel) populateProxySelect(sel);
+  const rsel = ev.target.closest('select[data-proxy-realm]');
+  if (rsel) rsel.dataset.populated = '1';
+});
+$('accBody').addEventListener('change', async ev => {
+  const sel = ev.target.closest('select[data-proxy-uid]');
+  if (sel) await saveProxyBinding(sel);
+});
+$('pxRealmCn').addEventListener('change', saveProxyBinding);
+$('pxRealmGlobal').addEventListener('change', saveProxyBinding);
+
+function startAccountConcurrency(uid, override, el) {
+  if (!el || editingConcUID) return;
+  editingConcUID = uid;
+  const old = el.innerHTML;
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.min = '0';
+  input.max = '64';
+  input.value = String(override || 0);
+  input.title = '0 = 按域默认（国内 3 / 国际 2）；1-64 = 自定义上限';
+  input.style.width = '100%';
+  el.innerHTML = '';
+  el.appendChild(input);
+  let cancelled = false;
+  const finish = async () => {
+    if (cancelled) return;
+    const val = Number(input.value);
+    editingConcUID = '';
+    try {
+      const r = await api('accounts/' + encodeURIComponent(uid) + '/concurrency', {
+        method: 'PUT',
+        body: JSON.stringify({ concurrency: Number.isFinite(val) ? val : 0 }),
+      });
+      toast('并发已更新：当前 ' + r.concurrency + ' / 上限 ' + r.limit, 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    loadOverview(true);
+  };
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancelled = true; editingConcUID = ''; el.innerHTML = old; }
+  });
+  input.addEventListener('blur', finish);
+  input.focus();
+  input.select();
+}
+
+function startAccountRename(uid, name, el) {
+  if (!el || editingNameUID) return;
+  editingNameUID = uid;
+  const old = el.innerHTML;
+  const input = document.createElement('input');
+  input.className = 'nm-input';
+  input.value = name || '';
+  input.maxLength = 64;
+  input.style.width = '100%';
+  el.innerHTML = '';
+  el.appendChild(input);
+  let cancelled = false;
+  const finish = async () => {
+    if (cancelled) return;
+    const val = input.value.trim();
+    editingNameUID = '';
+    try {
+      await api('accounts/' + encodeURIComponent(uid) + '/nickname', { method: 'POST', body: JSON.stringify({ nickname: val }) });
+      toast('账号名已更新', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    loadOverview(true);
+  };
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancelled = true; editingNameUID = ''; el.innerHTML = old; }
+  });
+  input.addEventListener('blur', finish);
+  input.focus();
+  input.select();
+}
+$('accBody').addEventListener('click', ev => {
+  const nm = ev.target.closest('.nm[data-uid]');
+  if (nm && !ev.target.closest('input')) {
+    startAccountRename(nm.dataset.uid, nm.dataset.name || '', nm);
+    return;
+  }
+  const cc = ev.target.closest('.conc[data-uid]');
+  if (cc && !ev.target.closest('input')) {
+    startAccountConcurrency(cc.dataset.uid, Number(cc.dataset.override || 0), cc);
+  }
+});
 
 $('accBody').addEventListener('click', async ev => {
   const b = ev.target.closest('button[data-a]');
@@ -592,7 +975,7 @@ $('btnActivityAll').onclick = async () => {
 };
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
-/* 实测上限标注：scripts/probe_max_tokens.py --panel-out 写入探测结果，
+/* 实测上限标注：tests/scripts/probe_max_tokens.py --panel-out 写入探测结果，
    /panel/api/model_probes 只读透传。探测键带域前缀（cn:glm-5.2），模型表
    显示裸名，按「精确命中或 :后缀」关联。无数据时本列退回上游声称值。 */
 function fmtK(n) { n = Number(n || 0); return n >= 1000 ? Math.round(n / 1000) + 'K' : String(n); }
@@ -1142,7 +1525,10 @@ const CFG_MAP = {
   balance_refresh_enabled: ['schedule', 'balance_refresh_enabled'], balance_refresh_minutes: ['schedule', 'balance_refresh_minutes'],
   task_sweep_enabled: ['schedule', 'task_sweep_enabled'], task_sweep_minutes: ['schedule', 'task_sweep_minutes'],
   include_disabled_in_tasks: ['schedule', 'include_disabled_in_tasks'],
-  max_in_flight: ['pool', 'max_in_flight'], max_in_flight_global: ['pool', 'max_in_flight_global'],
+  concurrency_wait_timeout: ['pool', 'concurrency_wait_timeout'], concurrency_wait_queue: ['pool', 'concurrency_wait_queue'],
+  keep_recent_rounds: ['prompt', 'keep_recent_rounds'],
+  embeddings_enabled: ['features', 'embeddings_enabled'],
+  watermark_strip_enabled: ['features', 'watermark_strip_enabled'],
   breaker_threshold: ['pool', 'breaker_threshold'],
   degrade_threshold: ['pool', 'degrade_threshold'], degrade_cooldown: ['pool', 'degrade_cooldown'],
   degrade_cooldown_max: ['pool', 'degrade_cooldown_max'],
@@ -1227,7 +1613,7 @@ function collectConfig() {
    不再等到保存被拒。 */
 const DURATION_RE = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/;
 const DURATION_FIELDS = ['soft_rate', 'soft_rate_max', 'breaker_cooldown', 'breaker_cooldown_max',
-  'degrade_cooldown', 'degrade_cooldown_max', 'cost_explore_interval', 'expiring_soon', 'ttl'];
+  'degrade_cooldown', 'degrade_cooldown_max', 'cost_explore_interval', 'expiring_soon', 'ttl', 'concurrency_wait_timeout'];
 const DURATION_TIP = '格式应为 Go 时长：30m / 2h / 600s / 1h30m';
 function durationBad(name) {
   const el = $('cfgForm').elements[name];
@@ -1561,6 +1947,7 @@ if ($('btnCompClaimAll')) $('btnCompClaimAll').onclick = async () => {
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
 function refreshVisible() {
   if (view === 'accounts') { loadOverview(true); renderCachedCompensation(); }
+  else if (view === 'proxies') loadProxies(true);
   else if (view === 'logs') loadLogs();
   else if (view === 'taskscenter') reattachQueueView();
 }
@@ -1621,6 +2008,38 @@ function openTasks(uid) {
 function closeTasks() { $('taskVeil').classList.remove('on'); taskUID = null; }
 $('btnCloseTask').onclick = closeTasks;
 $('btnTaskReload').onclick = loadTasks;
+
+async function loadTaskJobs() {
+  const tb = $('jobBody'), note = $('jobNote');
+  if (!tb) return;
+  try {
+    const d = await api('tasks/jobs');
+    const jobs = d.jobs || [];
+    if (note) note.textContent = d.auto_enabled ? '' : '自动任务已关闭（仅手动作业）';
+    if (!jobs.length) {
+      tb.innerHTML = '<tr><td colspan="6"><div class="empty">暂无后台作业</div></td></tr>';
+      return;
+    }
+    const TAG = {
+      pending: ['mute', '排队中'], running: ['warn', '执行中'],
+      finished: ['ok', '已完成'], interrupted: ['warn', '已中断'], error: ['bad', '失败'],
+    };
+    tb.innerHTML = jobs.map(j => {
+      const st = TAG[j.status] || ['mute', j.status || '—'];
+      const who = esc(j.nickname || String(j.uid || '').slice(0, 8));
+      const prog = (j.completed || 0) + ' / ' + (j.total || 0);
+      return '<tr><td class="who"><div class="nm">' + who + '</div><div class="id">' + esc(String(j.uid || '').slice(0, 16)) + '</div></td>' +
+        '<td><span class="tag ' + st[0] + '">' + st[1] + '</span></td>' +
+        '<td class="num">' + prog + '</td>' +
+        '<td>' + esc(j.current_task || '—') + '</td>' +
+        '<td class="num">' + ago(j.updated_at) + '</td>' +
+        '<td>' + esc(j.message || j.error || '—') + '</td></tr>';
+    }).join('');
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="state err">' + esc(e.message) + '</div></td></tr>';
+  }
+}
+if ($('btnJobReload')) $('btnJobReload').onclick = loadTaskJobs;
 
 // 全部接受：把该账号未接受的任务一次性报名（幂等，跳过已接受/已领取）。
 $('btnTaskAcceptAll').onclick = async () => {
@@ -3355,73 +3774,9 @@ if ($('btnExp')) $('btnExp').onclick = () => loadExpiry(true);
 // 「刷新」始终实时查（显式 force，不依赖事件对象真值）
 if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
 
-/* ══ 账号备注（只写本机 localStorage；账号池 / 用量两个视图共用同一份映射）══════
-   键取 uid 前 8 位——与 renderUsageDim 账号维度的 key 和积分扣除表的 uid 前缀同源，
-   三个表格因此都能直接 join。展示层只替换文本并挂 .rm-ghost 虚体，账号标识本身
-   仍由服务端下发，不写回后端；备注是纯展示层信息，不参与选号 / 计费 / 鉴权。 */
-function remarksAll() {
-  if (remarksCache) return remarksCache;
-  try { remarksCache = JSON.parse(localStorage.getItem(LS_REMARKS)) || {}; }
-  catch (e) { remarksCache = {}; }
-  return remarksCache;
-}
-function remarkKey(uid) { return String(uid == null ? '' : uid).slice(0, 8); }
-function remarkOf(uid) {
-  const k = remarkKey(uid);
-  return k ? String(remarksAll()[k] || '') : '';
-}
-/* nameHtml 必须是已转义的 HTML；有备注时返回「备注 + 原标识（浅色虚体）」 */
-function remarkName(uid, nameHtml) {
-  const r = remarkOf(uid);
-  return r ? esc(r) + '<span class="rm-ghost">' + nameHtml + '</span>' : nameHtml;
-}
-function storeRemarks(map) {
-  remarksCache = map;
-  try { localStorage.setItem(LS_REMARKS, JSON.stringify(map)); } catch (e) {}
-}
-
-/* 编辑器的行来自 overview 缓存（账号池加载过就有），另外补上「已有备注但当前列表里
-   没有」的键，避免账号被移除后备注看起来凭空消失。 */
-function remarkFormRows() {
-  const rows = ((overviewData && overviewData.accounts) || [])
-    .map(s => ({ uid: remarkKey(s.uid), who: s.nickname || remarkKey(s.uid) }))
-    .filter(r => r.uid);
-  for (const k of Object.keys(remarksAll())) {
-    if (!rows.some(r => r.uid === k)) rows.push({ uid: k, who: k });
-  }
-  return rows;
-}
-function renderRemarkBody() {
-  const box = $('remarkBody');
-  if (!box) return;
-  const rows = remarkFormRows();
-  box.innerHTML = rows.length
-    ? rows.map(r => '<div class="rm-row"><span class="rm-who" title="' + esc(r.who) + '">' + esc(r.who) + '</span>' +
-        '<input type="text" data-uid="' + esc(r.uid) + '" value="' + esc(remarksAll()[r.uid] || '') + '" placeholder="备注（留空即清除）" maxlength="24"></div>').join('')
-    : '<div class="empty">暂无账号：先在「账号池」加载一次账号列表。</div>';
-}
-function openRemarks() {
-  renderRemarkBody();
-  if ($('remarkVeil')) $('remarkVeil').classList.add('on');
-}
-function closeRemarks() { if ($('remarkVeil')) $('remarkVeil').classList.remove('on'); }
-function saveRemarkForm() {
-  const map = {};
-  document.querySelectorAll('#remarkBody input[data-uid]').forEach(inp => {
-    const v = inp.value.trim();
-    if (v) map[inp.getAttribute('data-uid')] = v;
-  });
-  storeRemarks(map);
-  closeRemarks();
-  // 备注只影响本机展示：重渲染当前视图即可，无需后端参与。
-  if (view === 'accounts') loadOverview(true);
-  else if (view === 'usage' && usageData) renderUsage(usageData);
-  toast('备注已保存（仅本机浏览器）');
-}
-if ($('btnRemarks')) $('btnRemarks').onclick = openRemarks;
-if ($('btnRemarkClose')) $('btnRemarkClose').onclick = closeRemarks;
-if ($('btnRemarkClear')) $('btnRemarkClear').onclick = () => { storeRemarks({}); renderRemarkBody(); };
-if ($('btnRemarkSave')) $('btnRemarkSave').onclick = saveRemarkForm;
+/* 账号展示名：直接使用服务端 nickname；改名在账号池内联完成并写回 auth JSON。
+   保留该兼容函数，避免用量/任务等视图的调用点继续依赖已删除的本机备注逻辑。 */
+function remarkName(_uid, nameHtml) { return nameHtml; }
 
 /* ══ 首页「积分到期提醒」折叠（选择记在本机，默认展开）═════════════════════
    展开态是原行为：点「检查」就要能立刻看到结果，所以默认不折叠；用户收起一次后

@@ -48,6 +48,26 @@ func isDeepSeekModel(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "deepseek")
 }
 
+// SplitRealmPrefix 拆分 "cn:xxx"/"global:xxx" 形式的 realm 前缀；无前缀时
+// realm 回落 "cn"、bare 原样返回。仅识别 cn/global 两个合法前缀。
+func SplitRealmPrefix(model string) (realm, bare string) {
+	if i := strings.IndexByte(model, ':'); i >= 0 {
+		switch model[:i] {
+		case "cn", "global":
+			return model[:i], model[i+1:]
+		}
+	}
+	return "cn", model
+}
+
+// ThinkingSwitchSupported 该模型能否用 thinking.type 关掉思考。
+// 目前只有 DeepSeek 系（thinking.go 只对这类模型注入 thinking 字段）。
+// 入参可带 realm 前缀（cn:/global:）。
+func ThinkingSwitchSupported(model string) bool {
+	_, bare := SplitRealmPrefix(model)
+	return isDeepSeekModel(bare)
+}
+
 // backfillReasoningContent DeepSeek 多轮一致性：保证每条 assistant 消息带
 // reasoning_content 字段且值为 string——即 requiresReasoningContentOnAssistantMessages
 // （官方客户端 matches 规则，issue #165 对齐官方 apply 门控）。

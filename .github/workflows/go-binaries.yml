@@ -34,8 +34,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
-      - run: go test ./...
+      # 测试文件统一放在 tests/ 镜像目录，由脚本注入临时源码副本后执行；
+      # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试会真实执行。
+      - run: ./tests/run.sh go
 
   build:
     needs: test

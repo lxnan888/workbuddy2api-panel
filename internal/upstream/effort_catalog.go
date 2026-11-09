@@ -1,17 +1,17 @@
 // effort_catalog.go 推理档位（reasoning effort）产品级静态兜底表。
 //
-// 数据来源三级（吸收参考仓库 reconcileWithFallback/buddy-adapter.ts:499-523 语义）：
+// 数据来源三级（吸收历史实测 reconcileWithFallback/buddy-adapter.ts:499-523 语义）：
 //   - 远端 FetchModels / global 探测已解析的 supportedEfforts/defaultEffort 桶（权威，优先）；
 //   - 本文件按 realm 分开的产品级静态兜底表（远端缺失时补齐）；
 //   - 两者皆无 → 不在 /v1/models 输出 effort 字段（omitted，不是空数组）。
 //
-// 档位值照抄参考仓库 dsh-codearts：CN/CodeBuddy 面取 src/product.ts CODEBUDDY_FALLBACK_MODELS
+// 档位值照抄历史实测 dsh-codearts：CN/CodeBuddy 面取 src/product.ts CODEBUDDY_FALLBACK_MODELS
 // ∪ src/buddy-adapter.ts:126-137 REASONING_EFFORTS；global/WorkBuddy 面取 src/product.ts
 // WORKBUDDY_FALLBACK_MODELS。两个 realm 对同一模型给出不同档位（如 deepseek-v4.1-flash：
 // CN 三档 ['low','high','max']、global 仅 ['high']），故**按 realm 分表**，绝不混用。
 //
 // 只列**可枚举**档位的模型；仅有固定默认档（glm-5.1/kimi-* 的 medium）同样入表，
-// 但其档位是「可枚举单档」而非「无选择器」，照抄参考仓库如实暴露。
+// 但其档位是「可枚举单档」而非「无选择器」，照抄历史实测如实暴露。
 package upstream
 
 // effortCap 一个模型的档位能力（对齐产品兜底表条目 reasoningEfforts + defaultReasoningEffort）。
@@ -111,7 +111,7 @@ func EffortListing(realm, model string, remoteEfforts []string, remoteDefault st
 	return efforts, def
 }
 
-// containsEffort 档位成员判定（精确匹配，对齐参考仓库 `efforts.includes(defaultEffort)`）。
+// containsEffort 档位成员判定（精确匹配，对齐历史实测 `efforts.includes(defaultEffort)`）。
 func containsEffort(efforts []string, want string) bool {
 	for _, e := range efforts {
 		if e == want {
@@ -126,7 +126,7 @@ func containsEffort(efforts []string, want string) bool {
 // prepareBody 对 global 请求调此函数（而非直接用远端桶），因为 global 上游可能不下发
 // supportedEfforts——此时也必须按产品静态表降级（issue #84：deepseek-v4.1-flash 国际版
 // 只认 high，客户端传 low/max 必降级到 high，否则上游 400 毁掉请求）。
-// 语义对齐参考仓库 effortsFor（remoteMeta → productFallback → 静态表），只取前两级：
+// 语义对齐历史实测 effortsFor（remoteMeta → productFallback → 静态表），只取前两级：
 // 远端桶（探测已解析）→ 本产品静态表（本文件），缺档位即无（不再到通用静态表）。
 func globalEffortMap(remoteEfforts map[string][]string, remoteDefaults map[string]string) (map[string][]string, map[string]string) {
 	efforts := make(map[string][]string, len(globalEffortFallback)+len(remoteEfforts))

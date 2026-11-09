@@ -29,7 +29,7 @@ var travelAccountDelay = 800 * time.Millisecond
 var activityAccountDelay = 800 * time.Millisecond
 
 // adoptReportGap 领养前置上报后的等待：给上游事件处理留时间再发 buddy/first。
-// 对齐 scripts/task_first_buddy.py 实测的 1.05s 间隔口径。测试可置 0。
+// 对齐 tests/scripts/task_first_buddy.py 实测的 1.05s 间隔口径。测试可置 0。
 var adoptReportGap = 1050 * time.Millisecond
 
 // cstZone 上游每日重置按自然日 00:00 CST（Asia/Shanghai）。中国无夏令时，固定 +8 即可，
@@ -127,7 +127,7 @@ func (s *Scheduler) travelClaim(a *auth.Auth, ts *upstream.TravelState) {
 
 // travelAdopt 无猫时领养，链路：report → agreement → buddy/first。
 //
-// report 必须先跑（scripts/task_first_buddy.py 实测）：一条 chat_request_send 上报
+// report 必须先跑（tests/scripts/task_first_buddy.py 实测）：一条 chat_request_send 上报
 // 点亮 growth 连登并**解锁 first_buddy 任务**；未上报时 buddy/first 会返回
 // 400 "first_buddy task not completed yet"——该门槛的真实来源是"当日无活跃上报"，
 // 不是账号问题（report.go 注释亦明确「解锁 first_buddy 任务（领养前置）」）。

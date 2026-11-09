@@ -593,15 +593,17 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .exp-main .note { margin-top: 2px; font-size: 11px; color: var(--ink-3); }
   .exp-main.err { color: var(--bad); }
 
-  /* ── 账号备注（本机 localStorage，不写服务器）─────────────────────────
-     有备注时备注当主标识，原昵称 / uid8 以 .rm-ghost 浅色跟随。账号池、用量明细、
-     积分扣除三张表共用同一套渲染，保证同一账号在两个视图里显示一致。 */
-  .rm-ghost { color: var(--ink-3); font-weight: 400; margin-left: .35em; }
-  .rm-list { display: flex; flex-direction: column; gap: 9px; }
-  .rm-row { display: flex; align-items: center; gap: 10px; }
-  .rm-row .rm-who { flex: 0 0 168px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    color: var(--ink-2); font-size: 12.5px; }
-  .rm-row input { flex: 1; }
+/* ── 代理池 / 账号出口 / 内联改名 ─────────────────────────────────── */
+.proxy-cell { min-width: 132px; }
+.proxy-sel { max-width: 168px; }
+.nm[data-uid] { cursor: text; }
+.nm[data-uid]:hover { color: var(--accent); }
+.nm-input {
+  width: 100%; font: inherit; color: var(--ink); background: var(--surface-2);
+  border: 1px solid var(--accent); border-radius: 6px; padding: 3px 7px;
+}
+#view-proxies textarea { width: 100%; resize: vertical; }
+#pxEditVeil .modal { max-width: 620px; }
 
 </style>
 <!-- 移动端适配：独立文件，必须在主 <style> 之后（@media 覆盖依赖层叠顺序） -->
@@ -618,6 +620,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#accounts" data-view="accounts" class="on">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
         账号池</a></li>
+      <li><a href="#proxies" data-view="proxies">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.6"/><path d="M2.4 8h11.2M8 2.4c1.6 1.5 2.4 3.4 2.4 5.6s-.8 4.1-2.4 5.6c-1.6-1.5-2.4-3.4-2.4-5.6S6.4 3.9 8 2.4z"/></svg>
+        代理池</a></li>
       <li><a href="#usage" data-view="usage">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
         用量</a></li>
@@ -707,7 +712,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>账号池</h3>
           <span class="grow"></span>
           <span class="note" id="accNote"></span>
-          <button class="xs" id="btnRemarks">备注</button>
           <button class="xs" id="btnCheckinAll">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
           <button class="xs" id="btnActivityAll">活跃上报</button>
@@ -717,8 +721,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <table class="acc">
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
-            <th>账号</th><th>状态</th><th>积分</th>
-            <th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
+            <th>账号</th><th>出口</th><th>状态</th><th>积分</th>
+            <th>成功 / 失败</th><th>并发</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>
         </table>
@@ -743,8 +747,109 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
     </section>
 
+    <!-- 代理池 -->
+    <section class="view" id="view-proxies" hidden>
+      <div class="stats">
+        <div class="stat"><div class="v" id="pxTotal">-</div><div class="k">代理总数</div></div>
+        <div class="stat good"><div class="v" id="pxHealthy">-</div><div class="k">健康</div></div>
+        <div class="stat bad"><div class="v" id="pxBad">-</div><div class="k">异常 / 屏蔽</div></div>
+        <div class="stat warn"><div class="v" id="pxPending">-</div><div class="k">待检测</div></div>
+        <div class="stat"><div class="v" id="pxGlobalState">-</div><div class="k">总代理</div></div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>总代理 <span class="hint">容器级出口：所有账号出站经它；有池代理时按“本地 → 总代理 → 池代理 → 上游”链式</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="pxGlobalNote"></span>
+          <button class="xs" id="btnPxGlobalTest">测试</button>
+          <button class="xs primary" id="btnPxGlobalSave">保存</button>
+        </header>
+        <div class="pad">
+          <div class="grid2">
+            <label class="fld"><span class="lb">总代理地址</span>
+              <input id="pxGlobalUrl" placeholder="http://user:pass@host:port 或 socks5://user:pass@host:port"></label>
+            <div class="switch"><span class="lb">启用总代理</span>
+              <input type="checkbox" id="pxGlobalEnabled"></div>
+          </div>
+          <div class="hint">支持 http/https/socks5/socks5h，可带或不带认证；也支持 host:port:user:pass、user:pass@host:port、host:port@user:pass、host:port（无 scheme 默认 http）。账号显式“直连”会绕过总代理。</div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>代理池</h3>
+          <span class="grow"></span>
+          <span class="note" id="pxNote"></span>
+          <button class="xs" id="btnPxCheckAll">全部检测</button>
+          <button class="xs primary" id="btnPxImportToggle">添加 / 导入</button>
+        </header>
+        <div class="pad" id="pxImportPanel" hidden>
+          <label class="fld"><span class="lb">每行一个代理（支持 # 注释）</span>
+            <textarea id="pxLines" rows="5" placeholder="host:port:user:pass
+user:pass@host:port
+host:port@user:pass
+http://user:pass@host:port
+socks5://user:pass@host:port"></textarea></label>
+          <div class="inline">
+            <button class="xs" id="btnPxTestInput">测试输入</button>
+            <span class="note" id="pxTestNote"></span>
+            <span class="grow"></span>
+            <button class="xs primary" id="btnPxImport">导入</button>
+          </div>
+          <div class="hint" id="pxImportResult"></div>
+        </div>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th>名称 / 协议</th><th>地址</th><th>状态</th><th class="num">延迟</th>
+              <th>最近检测</th><th>错误</th><th class="num">绑定</th><th>启用</th><th class="c-acts"></th>
+            </tr></thead>
+            <tbody id="pxBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>realm 默认出口</h3><span class="grow"></span><span class="note" id="pxRealmNote"></span><button class="xs" id="btnPxRealmSave">保存</button></header>
+        <div class="pad">
+          <div class="grid2">
+            <label class="fld"><span class="lb">国内版（cn）</span><select id="pxRealmCn"></select></label>
+            <label class="fld"><span class="lb">国际版（global）</span><select id="pxRealmGlobal"></select></label>
+          </div>
+          <div class="hint">账号没有显式绑定“出口”时取 realm 默认；“直连”会绕过总代理与池代理。</div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>健康检查</h3><span class="grow"></span><span class="note" id="pxHealthNote"></span><button class="xs" id="btnPxHealthSave">保存</button></header>
+        <div class="pad">
+          <div class="grid3">
+            <label class="fld"><span class="lb">检测 URL</span><input id="pxHealthUrl" placeholder="https://www.workbuddy.cn/"></label>
+            <label class="fld"><span class="lb">间隔（秒）</span><input id="pxHealthInterval" type="number" min="1"></label>
+            <label class="fld"><span class="lb">超时（秒）</span><input id="pxHealthTimeout" type="number" min="1"></label>
+          </div>
+          <div class="grid3">
+            <label class="fld"><span class="lb">失败阈值</span><input id="pxHealthFail" type="number" min="1"></label>
+            <label class="fld"><span class="lb">成功阈值</span><input id="pxHealthOK" type="number" min="1"></label>
+          </div>
+          <div class="hint">单条/全部测试都发起真实 GET，验证 DNS、TCP、代理握手、认证、TLS 与 HTTP；失败达到阈值后节点临时剔除，探测成功自动恢复。</div>
+        </div>
+      </div>
+    </section>
+
     <!-- 任务中心 -->
     <section class="view" id="view-taskscenter" hidden>
+      <div class="box">
+        <header><h3>后台作业 <span class="hint" id="jobNote"></span></h3><span class="grow"></span>
+          <button class="xs" id="btnJobReload">刷新作业</button></header>
+        <div class="pad">
+          <table class="acc">
+            <thead><tr><th>账号</th><th>状态</th><th class="num">进度</th><th>当前任务</th><th>更新时间</th><th>说明</th></tr></thead>
+            <tbody id="jobBody"></tbody>
+          </table>
+        </div>
+      </div>
       <div class="box">
         <header>
           <h3>成长任务队列 <span class="hint" id="qcSummary"></span></h3>
@@ -942,7 +1047,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="grid2">
               <label class="fld"><span class="lb">监听地址</span>
                 <input name="listen" placeholder=":7863">
-                <span class="hint">改动需重启进程</span></label>
+                <span class="hint">立即生效（进程内重建监听，旧连接自然结束）</span></label>
               <label class="fld"><span class="lb">API 密钥</span>
                 <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 不鉴权">
                 <button type="button" class="xs" id="btnEye">显示</button></div>
@@ -1041,14 +1146,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">国际版账号顺序（UID）</span>
                 <input name="international_account_order" placeholder="uid1, uid2, uid3"></label>
             </div>
-            <div class="hint">按地区独立热生效；未列出的账号按 UID 排序追加。指针按地区和模型分别保存。会话粘性、模型成本分层优先；有序策略等待冷却恢复，不提前试探。临时重试或在途占满不推进顺序耗尽的主账号。闲置与快过期积分权重仅用于加权随机。</div>
+            <div class="hint">按地区独立热生效；未列出的账号按 UID 排序追加。指针按地区和模型分别保存。会话粘性、模型成本分层优先；有序策略等待冷却恢复，不提前试探。临时重试或并发占满不推进顺序耗尽的主账号。闲置与快过期积分权重仅用于加权随机。</div>
             <div class="grid3">
-              <label class="fld"><span class="lb">单账号最大在途</span>
-                <input name="max_in_flight" type="number" min="0" placeholder="3">
-                <span class="hint">0 = 不限制</span></label>
-              <label class="fld"><span class="lb">国际版在途上限</span>
-                <input name="max_in_flight_global" type="number" min="1" placeholder="2">
-                <span class="hint">global 域风控更紧，默认 2</span></label>
+              <label class="fld"><span class="lb">并发满等待</span>
+                <input name="concurrency_wait_timeout" placeholder="30s">
+                <span class="hint">全部账号并发满时最多等待这么久</span></label>
+              <label class="fld"><span class="lb">并发排队上限</span>
+                <input name="concurrency_wait_queue" type="number" min="1" placeholder="100">
+                <span class="hint">超过后立即返回 429</span></label>
               <label class="fld"><span class="lb">连续失败熔断阈值</span>
                 <input name="breaker_threshold" type="number" min="1" placeholder="3"></label>
             </div>
@@ -1089,7 +1194,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">窗口内有快过期批次的账号选号权重 ×3（不排序、与金额无关）；0 关闭</span></label>
               <label class="fld"><span class="lb">会话粘性 TTL</span>
                 <input name="ttl" placeholder="30m">
-                <span class="hint">改动需重启进程</span></label>
+                <span class="hint">立即生效（GC 周期随之重启）</span></label>
             </div>
             <div class="switch"><span class="lb">快过期积分优先</span>
               <input type="checkbox" name="prefer_expiring"></div>
@@ -1113,7 +1218,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             </div>
             <div class="switch"><span class="lb">裸名跨域回退</span>
               <input type="checkbox" name="cross_domain_fallback"></div>
-            <div class="hint">开启后，首选域选不到可用账号（冷却 / 熔断 / 在途占满 / 该模型被 11102 拉黑）时改用另一域再选一次；跨域会消耗另一域的额度。显式前缀永不回退。立即生效。</div>
+            <div class="hint">开启后，首选域选不到可用账号（冷却 / 熔断 / 并发占满 / 该模型被 11102 拉黑）时改用另一域再选一次；跨域会消耗另一域的额度。显式前缀永不回退。立即生效。</div>
           </div>
         </div>
 
@@ -1123,36 +1228,43 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="grid3">
               <label class="fld"><span class="lb">短请求超时</span>
                 <input name="timeout_seconds" type="number" min="1" placeholder="120">
-                <span class="hint">需重启</span></label>
+                <span class="hint">立即生效</span></label>
               <label class="fld"><span class="lb">聊天首字节超时</span>
                 <input name="header_timeout_seconds" type="number" min="1" placeholder="120">
-                <span class="hint">需重启</span></label>
+                <span class="hint">立即生效</span></label>
               <label class="fld"><span class="lb">流空闲超时</span>
                 <input name="idle_timeout_seconds" type="number" min="1" placeholder="300">
-                <span class="hint">需重启</span></label>
+                <span class="hint">立即生效</span></label>
             </div>
             <div class="hr"></div>
             <div class="grid2">
               <label class="fld"><span class="lb">出站 User-Agent</span>
                 <input name="user_agent" placeholder="留空 = CLI/2.63.2 CodeBuddy/2.63.2">
-                <span class="hint">影响官网积分记录「使用端」显示；需重启</span></label>
+                <span class="hint">影响官网积分记录「使用端」显示；立即生效</span></label>
             </div>
             <div class="hr"></div>
             <div class="grid2">
               <label class="fld"><span class="lb">系统提示词模式</span>
                 <select name="prompt_mode">
-                  <option value="custom">custom — 网关自有提示词（避免指纹误报）</option>
-                  <option value="append">append — 客户端 system 后插网关提示词（并用）</option>
-                  <option value="passthrough">passthrough — 透传客户端原始 system</option>
+                  <option value="passthrough">passthrough — 保留客户端 system，仅补首条渠道兜底（默认）</option>
+                  <option value="custom">custom — 删除客户端全部 system / developer，改用网关提示词</option>
+                  <option value="append">append — 保留客户端 system，再追加网关提示词</option>
                 </select>
-                <span class="hint">需重启</span></label>
+                <span class="hint">立即生效；passthrough 不是字节级透传，出站管线仍做必要适配</span></label>
               <label class="fld"><span class="lb">提示词文件路径</span>
                 <input name="prompt_file" placeholder="留空 = 内置默认提示词">
-                <span class="hint">需重启</span></label>
+                <span class="hint">仅 custom / append 生效；立即生效</span></label>
             </div>
+            <label class="fld"><span class="lb">历史裁剪轮数</span>
+              <input name="keep_recent_rounds" type="number" min="0" placeholder="0">
+              <span class="hint">只保留最近 N 轮对话（system 永不删除）；0 = 不裁剪，立即生效</span></label>
             <div class="hr"></div>
             <div class="switch"><span class="lb">出站请求指纹脱敏</span>
               <input type="checkbox" name="sanitize_blacklist_fingerprints"></div>
+            <div class="switch"><span class="lb">OpenAI 嵌入端点（/v1/embeddings）</span>
+              <input type="checkbox" name="embeddings_enabled"></div>
+            <div class="switch"><span class="lb">图片去水印端点（/v1/images/strip-watermark）</span>
+              <input type="checkbox" name="watermark_strip_enabled"></div>
             <div class="switch"><span class="lb">会话粘性路由</span>
               <input type="checkbox" name="session_sticky_enabled"></div>
             <div class="hint" style="margin-top:10px">Upstash Redis 镜像、凭证目录与状态文件路径需手工编辑配置文件（判为重启项）。</div>
@@ -1375,22 +1487,21 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   </div>
 </div>
 
-<!-- 账号备注：只写本机 localStorage，不写回服务器；账号池与用量两个视图同步显示 -->
-<div class="veil" id="remarkVeil">
-  <div class="dlg" style="width:560px">
-    <header>
-      <h3>账号备注</h3>
-      <div class="hint">备注只存在本机浏览器（localStorage: wb2api.remarks.v1），不写回后端；账号池与用量页会同时显示「备注 + 原昵称」。留空即清除该账号备注。</div>
-    </header>
-    <div class="body">
-      <div class="rm-list" id="remarkBody"></div>
+<!-- 代理编辑：名称 / 地址 / 单独改密码 -->
+<div class="veil" id="pxEditVeil">
+  <div class="modal">
+    <header><h3>编辑代理</h3><span class="grow"></span><button class="xs ghost" id="pxEditClose">关闭</button></header>
+    <div class="pad">
+      <input type="hidden" id="pxEditID">
+      <div class="grid2">
+        <label class="fld"><span class="lb">名称</span><input id="pxEditName" maxlength="128" placeholder="留空 = 代理 host"></label>
+        <label class="fld"><span class="lb">地址</span><input id="pxEditUrl" placeholder="http://user:pass@host:port"></label>
+      </div>
+      <label class="fld"><span class="lb">单独改密码（可选）</span><input id="pxEditPassword" type="password" placeholder="留空 = 保留原密码"></label>
+      <div class="hint">地址支持 URL 与无 scheme 的冒号/@ 格式；改地址或启用状态会重置该节点的健康状态与连接池。</div>
+      <div class="inline"><span class="grow"></span><button class="xs" id="pxEditTest">测试</button><button class="xs primary" id="pxEditSave">保存</button></div>
+      <div class="hint" id="pxEditNote"></div>
     </div>
-    <footer>
-      <button class="danger" id="btnRemarkClear">清空全部</button>
-      <span class="grow"></span>
-      <button id="btnRemarkClose">关闭</button>
-      <button class="primary" id="btnRemarkSave">保存</button>
-    </footer>
   </div>
 </div>
 

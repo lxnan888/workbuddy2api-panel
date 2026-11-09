@@ -210,7 +210,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 凭证落盘（嵌套形，与 auths/ 目录既有格式一致）→ 热加载进池。
-	if err := os.MkdirAll(p.cfg.AuthDir, 0o755); err != nil {
+	if err := os.MkdirAll(p.AuthDir(), 0o755); err != nil {
 		writeErr(w, http.StatusInternalServerError, "mkdir auth dir: "+err.Error())
 		return
 	}
@@ -222,7 +222,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		UID:          acct.UID,
 		EnterpriseID: acct.EnterpriseID,
 		Nickname:     acct.Nickname,
-		FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", acct.UID)),
+		FilePath:     filepath.Join(p.AuthDir(), fmt.Sprintf("workbuddy-%s.json", acct.UID)),
 	}
 	// global 登录：落盘 auth.realm=global（Realm() 按此判域；不写则依赖 domain 后缀回落）。
 	if sess.realm == "global" {
@@ -240,6 +240,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	p.cfg.Pool.Add(a)
 	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
+	p.StartNewAccountTasks(acct.UID)
 
 	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
 	// realm 分支：CN 走 DailyCheckin；global 无 CN 签到体系，改为注册激活 + trial 领取
