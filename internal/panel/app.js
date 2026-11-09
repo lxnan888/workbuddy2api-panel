@@ -355,17 +355,18 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', proxies: '代理池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', proxies: '代理池', usage: '用量', balance: '余额趋势', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
   if (v === 'models' && !$('mdBody').children.length) loadModels();
-  if (v === 'config') loadConfig();
+  if (v === 'config') { loadConfig(); loadUpdate(); }
   if (v === 'proxies') loadProxies();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
+  if (v === 'balance') loadBalance();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
@@ -1665,6 +1666,31 @@ $('btnEye').onclick = () => {
   $('btnEye').textContent = show ? '隐藏' : '显示';
 };
 $('btnCfgReload').onclick = loadConfig;
+
+async function loadUpdate() {
+  const el = $('updStatus');
+  if (!el) return;
+  try {
+    const d = await api('update');
+    const s = d.status || {};
+    el.textContent = '当前 v' + (s.current_version || '—') +
+      (s.latest_version ? ' · 最新 ' + s.latest_version : '') +
+      (s.update_available ? ' · 有新版本' : ' · 已是最新') +
+      (s.last_error ? ' · 错误：' + s.last_error : '');
+    if ($('btnUpdateInstall')) $('btnUpdateInstall').disabled = !s.can_install;
+  } catch (e) {
+    el.textContent = '更新状态不可用：' + e.message;
+  }
+}
+if ($('btnUpdateCheck')) $('btnUpdateCheck').onclick = async () => {
+  try { await api('update/check', { method: 'POST' }); toast('检查完成', 'ok'); } catch (e) { toast(e.message, 'err'); }
+  loadUpdate();
+};
+if ($('btnUpdateInstall')) $('btnUpdateInstall').onclick = async () => {
+  if (!confirm('下载并安装最新版本？安装完成后服务会自动重启。')) return;
+  try { await api('update/install', { method: 'POST' }); toast('安装已开始', 'ok'); } catch (e) { toast(e.message, 'err'); }
+  loadUpdate();
+};
 $('cfgForm').onsubmit = async ev => {
   ev.preventDefault();
   // 时长字段脏值拦截：标红 + toast 点名，不发保存请求（后端同样会拒，这里前置）。
@@ -2065,6 +2091,33 @@ async function loadTaskJobs() {
   }
 }
 if ($('btnJobReload')) $('btnJobReload').onclick = loadTaskJobs;
+
+async function loadBalance() {
+  const tb = $('balBody'), note = $('balNote');
+  if (!tb) return;
+  try {
+    const d = await api('balance_history?days=30');
+    const series = d.series || [];
+    if (note) note.textContent = d.updated_at ? '窗口 30 天 · 最近采样 ' + ago(d.updated_at) : '窗口 30 天';
+    if (!series.length) {
+      tb.innerHTML = '<tr><td colspan="6"><div class="empty">还没有余额采样（签到/余额刷新后产生）</div></td></tr>';
+      return;
+    }
+    tb.innerHTML = series.map(s => {
+      const realm = s.realm === 'global' ? '国际版' : s.realm === 'cn' ? '国内版' : '—';
+      const chg = (s.change > 0 ? '+' : '') + (s.change || 0);
+      const last = s.points && s.points.length ? new Date(s.points[s.points.length - 1].t * 1000).toISOString() : '';
+      return '<tr><td class="who"><div class="nm">' + esc(s.name || String(s.uid || '').slice(0, 8)) + '</div><div class="id">' + esc(String(s.uid || '').slice(0, 16)) + '</div></td>' +
+        '<td>' + realm + '</td><td class="num">' + (s.current ?? 0) + '</td>' +
+        '<td class="num" style="color:' + (s.change < 0 ? 'var(--bad)' : 'var(--ok)') + '">' + chg + '</td>' +
+        '<td class="num">' + (s.min ?? 0) + ' / ' + (s.max ?? 0) + '</td>' +
+        '<td class="num">' + ago(last) + '</td></tr>';
+    }).join('');
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="state err">' + esc(e.message) + '</div></td></tr>';
+  }
+}
+if ($('btnBalReload')) $('btnBalReload').onclick = loadBalance;
 
 // 全部接受：把该账号未接受的任务一次性报名（幂等，跳过已接受/已领取）。
 $('btnTaskAcceptAll').onclick = async () => {

@@ -354,6 +354,12 @@ func main() {
 	// 历史裁剪轮数（0 = 不裁剪）。
 	upstream.SetKeepRecentRounds(cfg.Prompt.KeepRecentRounds)
 
+	// 自动更新（原生 Release）；面板在构造时即持有同一 manager。
+	updateMgr := updater.New(appVersion, "linguo2625469/workbuddy2api-panel", *cfgPath, updater.Settings{
+		AutoEnabled: cfg.Update.AutoEnabled,
+		AutoTime:    cfg.Update.AutoTime,
+	})
+
 	// 监听器 supervisor：listen / read_timeout 保存后进程内热切换（state_file 除外）。
 	srvRunner := &serverRunner{}
 
@@ -386,6 +392,7 @@ func main() {
 		// 积分历史账本（只读展示；写入由上面的余额观察者完成）。
 		CreditHistory: creditHist,
 		Balance:       bal,
+		Updater:       updateMgr,
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
@@ -454,10 +461,6 @@ func main() {
 	defer pn.StopTaskJobs()
 	pn.ResumeTaskJobs()
 	// 自动更新（原生 Release）。
-	updateMgr := updater.New(appVersion, "linguo2625469/workbuddy2api-panel", *cfgPath, updater.Settings{
-		AutoEnabled: cfg.Update.AutoEnabled,
-		AutoTime:    cfg.Update.AutoTime,
-	})
 	updateMgr.SetRestart(stop)
 	go updateMgr.Run(ctx)
 	// 账号池健康告警（webhook）。

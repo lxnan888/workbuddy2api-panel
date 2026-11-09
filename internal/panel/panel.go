@@ -31,6 +31,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/proxypool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/updater"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
@@ -69,6 +70,8 @@ type Config struct {
 	CreditHistory *credithist.Ledger
 	// Balance 余额趋势采样（nil = 趋势接口返回 501）。
 	Balance *balance.Recorder
+	// Updater 在线更新管理器（nil = 更新接口返回 501）。
+	Updater *updater.Manager
 
 	// ProbeFile 模型输出上限探测结果文件（tests/scripts/probe_max_tokens.py --panel-out
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
@@ -204,6 +207,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
 	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistory))
 	p.mux.HandleFunc("GET /panel/api/balance_history", p.withAuth(p.balanceHistory))
+	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateStatus))
+	p.mux.HandleFunc("POST /panel/api/update/check", p.withAuth(p.updateCheck))
+	p.mux.HandleFunc("POST /panel/api/update/install", p.withAuth(p.updateInstall))
 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
