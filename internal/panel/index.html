@@ -1272,13 +1272,78 @@ socks5://user:pass@host:port"></textarea></label>
         </div>
 
         <div class="box">
+          <header><h3>运维、预算与告警</h3></header>
+          <div class="pad">
+            <div class="grid3">
+              <label class="fld"><span class="lb">每日积分上限</span>
+                <input name="budget_daily_credit_limit" type="number" min="0" step="0.01" placeholder="0">
+                <span class="hint">0 = 不限；超限 429</span></label>
+              <label class="fld"><span class="lb">5 分钟突发积分</span>
+                <input name="budget_burst_credit_limit" type="number" min="0" step="0.01" placeholder="0">
+                <span class="hint">0 = 关闭</span></label>
+              <label class="fld"><span class="lb">低缓存率阈值（%）</span>
+                <input name="budget_cache_low_rate" type="number" min="0" step="0.1" placeholder="0">
+                <span class="hint">连续 5 轮低于此值冷却 60s；0 = 关闭</span></label>
+            </div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">告警 Webhook</span>
+                <input name="alerting_webhook_url" placeholder="留空 = 不推送"></label>
+              <label class="fld"><span class="lb">告警 Secret</span>
+                <input name="alerting_secret" type="password" placeholder="可选"></label>
+              <label class="fld"><span class="lb">检查间隔（秒）</span>
+                <input name="alerting_interval_seconds" type="number" min="5" placeholder="60"></label>
+            </div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">CN 最低健康数</span>
+                <input name="alerting_min_healthy_cn" type="number" min="0" placeholder="1"></label>
+              <label class="fld"><span class="lb">Global 最低健康数</span>
+                <input name="alerting_min_healthy_global" type="number" min="0" placeholder="0"></label>
+              <label class="fld"><span class="lb">恢复健康数</span>
+                <input name="alerting_recover_healthy" type="number" min="0" placeholder="1"></label>
+            </div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">告警超时（秒）</span>
+                <input name="alerting_timeout_seconds" type="number" min="1" placeholder="10"></label>
+              <label class="fld"><span class="lb">启动宽限（秒）</span>
+                <input name="alerting_startup_grace_seconds" type="number" min="0" placeholder="60"></label>
+              <label class="fld"><span class="lb">熔断阈值</span>
+                <input name="alerting_breaker_threshold" type="number" min="1" placeholder="3"></label>
+            </div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">连续告警 Tick</span>
+                <input name="alerting_for_ticks" type="number" min="1" placeholder="3"></label>
+              <label class="fld"><span class="lb">恢复 Tick</span>
+                <input name="alerting_clear_ticks" type="number" min="1" placeholder="2"></label>
+              <label class="fld"><span class="lb">Watchdog 间隔（秒）</span>
+                <input name="watchdog_interval_seconds" type="number" min="60" placeholder="3600"></label>
+            </div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">自动更新时间</span>
+                <input name="update_auto_time" placeholder="04:00"></label>
+              <label class="fld"><span class="lb">审计日志文件</span>
+                <input name="admin_audit_file" placeholder="留空 = 不写"></label>
+            </div>
+            <div class="switch"><span class="lb">启用告警</span><input type="checkbox" name="alerting_enabled"></div>
+            <div class="switch"><span class="lb">告警恢复通知</span><input type="checkbox" name="alerting_send_resolve"></div>
+            <div class="switch"><span class="lb">启用上游目录 Watchdog</span><input type="checkbox" name="watchdog_enabled"></div>
+            <div class="switch"><span class="lb">自动更新</span><input type="checkbox" name="update_auto_enabled"></div>
+            <div class="switch"><span class="lb">开放 /metrics</span><input type="checkbox" name="metrics_enabled"></div>
+            <div class="switch"><span class="lb">开放 /admin/tasks</span><input type="checkbox" name="admin_enabled"></div>
+            <div class="switch"><span class="lb">管理员操作审计</span><input type="checkbox" name="admin_audit_enabled"></div>
+            <div class="hint" style="margin-top:8px">告警/预算/开关类字段保存后立即生效；审计文件与更新相关配置在装配期读取。</div>
+          </div>
+        </div>
+
+        <div class="box">
           <header><h3>日志</h3></header>
           <div class="pad">
             <div class="switch"><span class="lb">记录调用来源（客户端 IP / User-Agent）</span>
               <input type="checkbox" name="request_client_info"></div>
+            <div class="switch"><span class="lb">请求事件记录会话上下文</span>
+              <input type="checkbox" name="request_archive_context"></div>
             <div class="hint">开启后，「运行日志」页的请求记录会显示每次调用来自哪个 IP、用什么客户端；
               关闭则归档与面板都不再出现来源信息。改动即时生效，无需重启。</div>
-            <div class="hint" style="margin-top:8px">归档开关、保留天数与容量上限（<code>logging.request_archive_*</code>）需手工编辑配置文件。</div>
+            <div class="hint" style="margin-top:8px">归档开关、保留天数与容量上限（<code>logging.request_archive_*</code>）保存后立即生效。</div>
           </div>
         </div>
 
