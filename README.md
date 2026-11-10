@@ -36,6 +36,8 @@
 > | **限速与燃烧监控移除** | 删除按账号/类别的令牌桶限速与 `credit_burn` 监控（包、配置、状态字段、测试、文档一并移除）。请求不再被网关主动限速；账号健康仍由软冷却、熔断、连败降权控制。 |
 > | **在途改为每账号并发** | 删除 `pool.max_in_flight` / `max_in_flight_global`；国内默认并发 3、国际默认 2，`0` = 按域默认；账号表「并发」列可点击单独设置（1–64），写入 `state.json` 并实时生效；并发满自动换号。 |
 > | **并发等待队列** | 全部账号并发满时等待 `pool.concurrency_wait_timeout`（默认 30s），排队上限 `pool.concurrency_wait_queue`（默认 100）；排队满回 429 `gateway_queue_full`，等待超时回 429 `gateway_concurrency_limit`，完全没号回 503。 |
+> | **账号池筛选与静默刷新** | 顶部状态卡（账号总数 / 可用 / 冷却中 / 已禁用 / 已暂停选号）可点击筛选账号表，默认只显示「可用」；轮询刷新改为内容不变不动 DOM，表格内编辑/下拉操作期间不重建，消除闪烁与输入打断。 |
+> | **账号固定代理常显** | 账号「出口」下拉直接列出全部代理（随机 / 直连 / 固定代理），不再等 focus 才填充；每个账号可单独绑定固定代理。 |
 > | **模型级阻塞状态码对齐** | 全池某模型 6004 限流 → 429 `model_rate_limited`（可退避重试）；全池 11102 / 11158 模型不可用 → 404 `model_not_found`（换模型才有用，原 400 `model_unavailable` 会让客户端误判为请求参数错误）；无可用账号 → 503 `no_healthy_account`。 |
 > | **配置全量热生效** | 除 `state_file` 外，提示词、超时、UA、上游 base、`max_payload_bytes`、`restriction_hold_seconds`、`listen`、`read_timeout`、`auth_dir`、`upstash`、`session_sticky.*`、日志归档、模型开关、并发等待等保存后立即生效；`listen`/`read_timeout` 进程内重建监听。 |
 > | **请求管线增强** | 出站模型剥 realm 前缀；目录 `max_output_tokens` 补缺省额度；字符串 `stop` 归一化为数组；`prompt.keep_recent_rounds` 历史裁剪；思考档位输出预算下限；工具描述脱敏；`prompt_cache_key` 改为 UUID v4 形态；补会话轮级字段；chat body gzip 与 RPC gzip/deflate/br 解码。 |

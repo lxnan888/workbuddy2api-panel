@@ -668,11 +668,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <!-- 账号池 -->
     <section class="view" id="view-accounts">
       <div class="stats">
-        <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
-        <div class="stat good"><div class="v" id="sHealthy">-</div><div class="k">可用</div></div>
-        <div class="stat warn"><div class="v" id="sCooling">-</div><div class="k">冷却中</div></div>
-        <div class="stat bad"><div class="v" id="sDisabled">-</div><div class="k">已禁用</div></div>
-        <div class="stat warn"><div class="v" id="sPaused">-</div><div class="k">已暂停选号</div></div>
+        <div class="stat" data-filter="total" style="cursor:pointer" title="点击筛选：全部账号"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
+        <div class="stat good" data-filter="healthy" style="cursor:pointer" title="点击筛选：仅可用"><div class="v" id="sHealthy">-</div><div class="k">可用</div></div>
+        <div class="stat warn" data-filter="cooling" style="cursor:pointer" title="点击筛选：冷却/熔断/降权中"><div class="v" id="sCooling">-</div><div class="k">冷却中</div></div>
+        <div class="stat bad" data-filter="disabled" style="cursor:pointer" title="点击筛选：已禁用/已暂停选号"><div class="v" id="sDisabled">-</div><div class="k">已禁用</div></div>
+        <div class="stat warn" data-filter="paused" style="cursor:pointer" title="点击筛选：仅已暂停选号"><div class="v" id="sPaused">-</div><div class="k">已暂停选号</div></div>
         <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分剩余 / 总额</div></div>
         <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
       </div>

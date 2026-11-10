@@ -62,6 +62,12 @@ function toast(msg, cls) {
   $('toasts').appendChild(el);
   setTimeout(() => el.remove(), 3600);
 }
+// setText 仅当内容变化时写入 textContent，避免轮询刷新导致整页闪烁。
+function setText(id, v) {
+  const el = $(id);
+  const s = String(v == null ? '' : v);
+  if (el && el.textContent !== s) el.textContent = s;
+}
 // esc 文本/属性双安全转义。不能只用 div.innerHTML（它转义 <>& 但不转义引号），
 // 否则字符串拼进 HTML 属性（如 title="uid: ..."）时引号可闭合属性并注入事件处理器。
 // 显式替换 5 个字符：& < > " '（& 必须最先，避免二次转义）。
@@ -385,20 +391,45 @@ setTimeout(() => {
 }, 0);
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
+let accFilter = 'healthy'; // 顶部状态筛选：total / healthy / cooling / disabled / paused
+
+function accCoolLeft(s) {
+  const bl = new Date(s.breaker_until || 0) - Date.now();
+  const dg = new Date(s.degrade_until || 0) - Date.now();
+  return Math.max((s.cool_remaining_sec || 0) * 1000, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
+}
+
 function renderAccounts(list) {
   const tb = $('accBody');
   // 内联改名/改并发期间不让 5 秒轮询重建表格（否则输入框会被冲掉）。
   if (editingNameUID || editingConcUID) return;
-  if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+  // 焦点在表格内（下拉展开/正在选择）时不重建，避免操作被打断。
+  if (document.activeElement && tb && tb.contains(document.activeElement)) return;
+  let rows = list || [];
+  if (accFilter !== 'total') {
+    rows = rows.filter(s => {
+      const cool = accCoolLeft(s);
+      switch (accFilter) {
+        case 'healthy': return !s.disabled && !s.paused && cool <= 0;
+        case 'cooling': return !s.disabled && cool > 0;
+        case 'disabled': return !!s.disabled || !!s.paused;
+        case 'paused': return !!s.paused && !s.disabled;
+      }
+      return true;
+    });
+  }
+  let html;
+  if (!rows.length) {
+    html = '<tr><td colspan="10"><div class="empty"><div class="big">' + (list && list.length ? '该筛选下没有账号' : '账号池是空的') + '</div>' + (list && list.length ? '点击顶部状态可切换筛选' : '点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号') + '</div></td></tr>';
+    if (tb.innerHTML !== html) tb.innerHTML = html;
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
-  const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
-  tb.innerHTML = list.map(s => {
+  const maxCred = Math.max(1, ...rows.map(s => s.credits || 0));
+  html = rows.map(s => {
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
-    const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
+    const cool = accCoolLeft(s) / 1000;
     let cls = '', tag;
     if (s.disabled) { cls = 'off'; tag = '<span class="tag bad">已禁用</span>'; }
     else if (s.paused) { cls = 'off'; tag = '<span class="tag warn">已暂停选号</span>'; }
@@ -472,7 +503,22 @@ function renderAccounts(list) {
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
       '</td></tr>';
   }).join('');
+  // 静默刷新：内容没变就不动 DOM，避免整表重绘闪烁。
+  if (tb.innerHTML !== html) tb.innerHTML = html;
 }
+
+function updateStatActive() {
+  document.querySelectorAll('.stat[data-filter]').forEach(el => {
+    el.style.boxShadow = el.dataset.filter === accFilter ? 'inset 0 0 0 2px var(--ink-2)' : '';
+  });
+}
+document.querySelectorAll('.stat[data-filter]').forEach(el => {
+  el.addEventListener('click', () => {
+    accFilter = el.dataset.filter;
+    if (overviewData) renderAccounts(overviewData.accounts || []);
+    updateStatActive();
+  });
+});
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
 // 后端 model_locks 已按「整池不可用 → 没号可用 → 部分限流」排好序，这里只做展示。
@@ -514,26 +560,28 @@ async function loadOverview(quiet) {
   try {
     const d = await api('overview');
     overviewData = d;
-    $('sTotal').textContent = d.total;
-    $('sHealthy').textContent = d.healthy;
-    $('sCooling').textContent = d.cooling;
-    $('sDisabled').textContent = d.disabled;
+    setText('sTotal', d.total);
+    setText('sHealthy', d.healthy);
+    setText('sCooling', d.cooling);
+    setText('sDisabled', d.disabled);
     // 暂停选号单列（issue #125）：它只关选号、照常签到保活，与禁用是两种状态。
-    if ($('sPaused')) $('sPaused').textContent = d.paused == null ? '-' : d.paused;
+    if ($('sPaused')) setText('sPaused', d.paused == null ? '-' : d.paused);
     const remSum = (d.accounts || []).reduce((a, s) => a + (s.credits || 0), 0);
-  const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
-  $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
-    $('sSticky').textContent = d.sticky_sessions;
-    $('navSub').textContent = 'v' + d.version;
-    $('navVer').textContent = 'v' + d.version;
-    $('navRedis').textContent = d.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存';
-    $('navState').textContent = d.healthy > 0 ? '服务正常' : (d.total ? '无可用账号' : '待添加账号');
+    const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
+    setText('sCredits', totSum > 0 ? remSum + ' / ' + totSum : remSum);
+    setText('sSticky', d.sticky_sessions);
+    setText('navSub', 'v' + d.version);
+    setText('navVer', 'v' + d.version);
+    setText('navRedis', d.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存');
+    setText('navState', d.healthy > 0 ? '服务正常' : (d.total ? '无可用账号' : '待添加账号'));
     const p = $('navPulse');
-    p.className = 'pulse' + (d.healthy > 0 ? '' : (d.total ? ' warn' : ' bad'));
-    $('accNote').textContent = d.concurrency_full ? d.concurrency_full + ' 个账号并发已满' : '';
+    const cls = 'pulse' + (d.healthy > 0 ? '' : (d.total ? ' warn' : ' bad'));
+    if (p.className !== cls) p.className = cls;
+    setText('accNote', d.concurrency_full ? d.concurrency_full + ' 个账号并发已满' : '');
     const up = Math.floor(d.uptime_sec);
-    $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
+    setText('subMeta', '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分');
     renderAccounts(d.accounts || []);
+    updateStatActive();
     renderModelLocks(d.model_locks);
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的按日批次，不额外发请求）。
     // 2 分钟内的实时明细最新且更全，保留；过期后由 state 快照接管，避免点过一次
@@ -582,8 +630,9 @@ function proxyOptionsHTML(binding, includeAll) {
 }
 function accountProxyHTML(uid, realm) {
   const b = proxyBindingOf(uid);
-  return '<select class="proxy-sel" data-proxy-uid="' + esc(uid) + '" title="账号出口：随机 / 直连 / 固定代理">' +
-    proxyOptionsHTML(b, false) + '</select>';
+  // 固定代理选项常显（不再等 focus 才填充），data-populated 防止 focusin 再重建。
+  return '<select class="proxy-sel" data-proxy-uid="' + esc(uid) + '" data-populated="1" title="账号出口：随机 / 直连 / 固定代理">' +
+    proxyOptionsHTML(b, true) + '</select>';
 }
 function populateProxySelect(sel) {
   if (!sel || sel.dataset.populated === '1') return;
