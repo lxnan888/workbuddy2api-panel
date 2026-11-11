@@ -38,10 +38,12 @@ type Config struct {
 	// AvailableForModel 按请求模型返回"在该模型上可用"的账号（healthy 且未占满在途，
 	// 且未被该模型限流/限额）。nil 时回落 Available（无模型维度，行为与引入前一致）。
 	//
-	// 为什么粘性需要模型维度：绑定只记 uid，而同一个会话可能换模型。账号被 6004
-	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
-	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
+	// 该列表同时用于**校验已绑定账号是否仍可用**，因此不应按优先级过滤：已绑定的
+	// 低优先级账号继续有效（粘性优先）。新会话分配请使用 AllocForModel。
 	AvailableForModel func(model string) []string
+	// AllocForModel 为新会话分配账号时的候选列表；与 AvailableForModel 分离，
+	// 可按账号优先级收敛到最高优先级组。nil 时回落 AvailableForModel（旧行为）。
+	AllocForModel func(model string) []string
 }
 
 // Router 会话粘性路由器。
@@ -94,6 +96,12 @@ func (r *Router) Reconfigure(cfg Config) {
 	}
 	if cfg.Store != nil {
 		r.cfg.Store = cfg.Store
+	}
+	if cfg.AvailableForModel != nil {
+		r.cfg.AvailableForModel = cfg.AvailableForModel
+	}
+	if cfg.AllocForModel != nil {
+		r.cfg.AllocForModel = cfg.AllocForModel
 	}
 	r.mu.Unlock()
 	r.StopGC()
@@ -223,7 +231,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 		delete(r.entries, key) // 失效：清掉再分配
 	}
 
-	uids := r.availableSlice(model)
+	uids := r.allocSlice(model)
 	if len(uids) == 0 {
 		return "", false
 	}
@@ -335,6 +343,15 @@ func (r *Router) availableSlice(model string) []string {
 		return nil
 	}
 	return r.cfg.Available()
+}
+
+// allocSlice 返回新会话分配用的候选列表：优先 AllocForModel（可按优先级收敛），
+// 未注入时回落 availableSlice（旧行为）。
+func (r *Router) allocSlice(model string) []string {
+	if r.cfg.AllocForModel != nil {
+		return r.cfg.AllocForModel(model)
+	}
+	return r.availableSlice(model)
 }
 
 func expired(e entry, now time.Time, ttl time.Duration) bool {

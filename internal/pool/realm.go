@@ -127,3 +127,87 @@ func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 	sort.Strings(uids)
 	return uids
 }
+
+// AvailableUIDsForModelRealms 返回可服务该模型的账号，供会话粘性校验「已绑定账号
+// 是否仍可用」。与 WeightedAvailableUIDsForModelPriority 的区别：本方法**不按优先级
+// 过滤**——已绑定的低优先级账号继续有效（粘性优先）；includeOther=true 时合并两域，
+// 让裸模型名绑定到另一域后不会被粘性校验误判为失效。
+func (p *Pool) AvailableUIDsForModelRealms(model, preferredRealm string, includeOther bool) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	uids := make([]string, 0, len(p.byUID))
+	for uid, e := range p.byUID {
+		if !realmAllowed(e, preferredRealm, includeOther) {
+			continue
+		}
+		if !e.healthyForModel(now, model) {
+			continue
+		}
+		if p.concurrencyFull(e) {
+			continue
+		}
+		if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {
+			continue
+		}
+		uids = append(uids, uid)
+	}
+	sort.Strings(uids)
+	return uids
+}
+
+// WeightedAvailableUIDsForModelPriority 返回新粘性会话的可分配账号列表：
+// 只保留最高优先级组；同优先级内首选域优先，首选域没有可分配账号时才用另一域。
+// 与 pick 的优先级口径一致；快过期账号仍按虚拟实例权重展开（同组内温和偏好）。
+// includeOther=false 时只在 preferredRealm 内分配（显式 cn:/global: 前缀）。
+func (p *Pool) WeightedAvailableUIDsForModelPriority(model, preferredRealm string, includeOther bool) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	cands := make([]*entry, 0, len(p.byUID))
+	for _, e := range p.byUID {
+		if !realmAllowed(e, preferredRealm, includeOther) {
+			continue
+		}
+		if !e.healthyForModel(now, model) {
+			continue
+		}
+		if p.concurrencyFull(e) {
+			continue
+		}
+		if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {
+			continue
+		}
+		cands = append(cands, e)
+	}
+	if len(cands) == 0 {
+		return nil
+	}
+	cands = maxPriorityCandidates(cands)
+	if includeOther && preferredRealm != "" {
+		if pref := realmCandidates(cands, preferredRealm); len(pref) > 0 {
+			cands = pref
+		}
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].a.UID < cands[j].a.UID })
+	out := make([]string, 0, len(cands))
+	for _, e := range cands {
+		slots := 1
+		if p.preferExpiring && expiringNow(e, now) {
+			slots = expiringVirtualSlots
+		}
+		for i := 0; i < slots; i++ {
+			out = append(out, e.a.UID)
+		}
+	}
+	return out
+}
+
+// realmAllowed 报告账号是否在本次选号允许的域内：preferredRealm 为空或
+// includeOther=true 时不限域（跨域优先级），否则必须精确匹配首选域。
+func realmAllowed(e *entry, preferredRealm string, includeOther bool) bool {
+	if preferredRealm == "" || includeOther {
+		return true
+	}
+	return e.a.Realm() == preferredRealm
+}

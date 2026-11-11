@@ -30,8 +30,8 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/updater"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
@@ -110,6 +110,12 @@ func main() {
 	_ = p.SetScheduling(cfg.Pool.Strategy, cfg.Pool.AccountOrder)
 
 	// 会话粘性路由（常驻创建，enabled 由面板热开关控制）。
+	// live 在下方创建；闭包捕获变量本身，请求到达时已初始化，preferred_realm
+	// 热改后粘性分配也会跟着变（cross_domain_fallback 由 pool 实时读取）。
+	var live *livecfg.Holder
+	availableForModel, allocForModel := realmAwareAvailableForModel(p, func() livecfg.Snapshot {
+		return live.Load()
+	})
 	var sessRouter *session.Router
 	redisMode := "noop"
 	if _, ok := store.(redisstore.Noop); !ok {
@@ -120,9 +126,10 @@ func main() {
 		GCInterval: cfg.SessionGCInterval,
 		Store:      store,
 		Available:  p.AvailableUIDs,
-		// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏）；
-		// 裸名走 cn（现状零回归）。闭包内部 resolveModel 剥前缀，再按 realm 过滤。
-		AvailableForModel: realmAwareAvailableForModel(p),
+		// 校验已有绑定：不按优先级过滤（粘性优先）；裸名跨域时合并两域。
+		AvailableForModel: availableForModel,
+		// 新会话分配：最高优先级组 + 首选域优先。
+		AllocForModel: allocForModel,
 	})
 	sessRouter.SetEnabled(cfg.SessionSticky.Enabled)
 	if cfg.SessionSticky.Enabled {
@@ -274,24 +281,24 @@ func main() {
 	// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进
 	// 面板环形缓冲，供 /panel/api/logs 读取；控制台输出行为完全不变。
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
-	live := livecfg.New(livecfg.Snapshot{
-		APIKey:               cfg.APIKey,
-		SoftCooldown:         cfg.SoftRateDur,
-		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
-		RecordClientInfo:     cfg.Logging.RequestClientInfo,
-		HiddenModels:         livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
-		BareModelIDs:         cfg.Models.BareIDs,
-		PreferredRealm:       cfg.Pool.PreferredRealm,
-		PromptMode:           cfg.Prompt.Mode,
-		PromptText:           cfg.PromptText,
-		MaxPayloadBytes:      cfg.Server.MaxPayloadBytes,
-		RestrictionHold:      time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
-		GlobalEnabled:        cfg.Global.Enabled,
-		EmbeddingsEnabled:    cfg.Features.EmbeddingsEnabled,
+	live = livecfg.New(livecfg.Snapshot{
+		APIKey:                cfg.APIKey,
+		SoftCooldown:          cfg.SoftRateDur,
+		SanitizeFingerprints:  cfg.Features.SanitizeBlacklistFingerprints,
+		RecordClientInfo:      cfg.Logging.RequestClientInfo,
+		HiddenModels:          livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
+		BareModelIDs:          cfg.Models.BareIDs,
+		PreferredRealm:        cfg.Pool.PreferredRealm,
+		PromptMode:            cfg.Prompt.Mode,
+		PromptText:            cfg.PromptText,
+		MaxPayloadBytes:       cfg.Server.MaxPayloadBytes,
+		RestrictionHold:       time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
+		GlobalEnabled:         cfg.Global.Enabled,
+		EmbeddingsEnabled:     cfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled: cfg.Features.WatermarkStripEnabled,
-		AllowlistEnabled:     len(livecfg.NormalizeAllowedModels(cfg.Models.Allowed)) > 0,
-		AllowedModels:        livecfg.NormalizeAllowedModels(cfg.Models.Allowed),
-		RecordContext:        cfg.Logging.RequestArchiveContext,
+		AllowlistEnabled:      len(livecfg.NormalizeAllowedModels(cfg.Models.Allowed)) > 0,
+		AllowedModels:         livecfg.NormalizeAllowedModels(cfg.Models.Allowed),
+		RecordContext:         cfg.Logging.RequestArchiveContext,
 	})
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
@@ -363,19 +370,19 @@ func main() {
 	// pn 先声明后赋值：SaveConfig 闭包需要引用，panel.New 构造期间尚不可用。
 	var pn *panel.Panel
 	pn = panel.New(panel.Config{
-		Pool:        p,
-		Usage:       rec,
-		RequestLog:  requestLog,
-		Upstream:    up,
-		Scheduler:   sch,
-		ProxyPool:   proxies,
+		Pool:             p,
+		Usage:            rec,
+		RequestLog:       requestLog,
+		Upstream:         up,
+		Scheduler:        sch,
+		ProxyPool:        proxies,
 		AutoTasksEnabled: func() bool { return cfg.Schedule.GrowthEnabled },
-		AuthDir:     cfg.AuthDir,
-		APIKey:      cfg.APIKey,
-		RedisMode:   redisMode,
-		StickyCount: sessCount,
-		Version:     appVersion,
-		Live:        live,
+		AuthDir:          cfg.AuthDir,
+		APIKey:           cfg.APIKey,
+		RedisMode:        redisMode,
+		StickyCount:      sessCount,
+		Version:          appVersion,
+		Live:             live,
 		// 模型上限探测数据（tests/scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -598,23 +605,23 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	live.Store(livecfg.Snapshot{
-		APIKey:               newCfg.APIKey,
-		SoftCooldown:         newCfg.SoftRateDur,
-		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
-		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
-		HiddenModels:         livecfg.NormalizeHiddenModels(newCfg.Models.Hidden),
-		BareModelIDs:         newCfg.Models.BareIDs,
-		PreferredRealm:       newCfg.Pool.PreferredRealm,
-		PromptMode:           newCfg.Prompt.Mode,
-		PromptText:           newCfg.PromptText,
-		MaxPayloadBytes:      newCfg.Server.MaxPayloadBytes,
-		RestrictionHold:      time.Duration(newCfg.Upstream.RestrictionHoldSeconds) * time.Second,
-		GlobalEnabled:        newCfg.Global.Enabled,
-		EmbeddingsEnabled:    newCfg.Features.EmbeddingsEnabled,
+		APIKey:                newCfg.APIKey,
+		SoftCooldown:          newCfg.SoftRateDur,
+		SanitizeFingerprints:  newCfg.Features.SanitizeBlacklistFingerprints,
+		RecordClientInfo:      newCfg.Logging.RequestClientInfo,
+		HiddenModels:          livecfg.NormalizeHiddenModels(newCfg.Models.Hidden),
+		BareModelIDs:          newCfg.Models.BareIDs,
+		PreferredRealm:        newCfg.Pool.PreferredRealm,
+		PromptMode:            newCfg.Prompt.Mode,
+		PromptText:            newCfg.PromptText,
+		MaxPayloadBytes:       newCfg.Server.MaxPayloadBytes,
+		RestrictionHold:       time.Duration(newCfg.Upstream.RestrictionHoldSeconds) * time.Second,
+		GlobalEnabled:         newCfg.Global.Enabled,
+		EmbeddingsEnabled:     newCfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,
-		AllowlistEnabled:     len(livecfg.NormalizeAllowedModels(newCfg.Models.Allowed)) > 0,
-		AllowedModels:        livecfg.NormalizeAllowedModels(newCfg.Models.Allowed),
-		RecordContext:        newCfg.Logging.RequestArchiveContext,
+		AllowlistEnabled:      len(livecfg.NormalizeAllowedModels(newCfg.Models.Allowed)) > 0,
+		AllowedModels:         livecfg.NormalizeAllowedModels(newCfg.Models.Allowed),
+		RecordContext:         newCfg.Logging.RequestArchiveContext,
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	up.SetOptions(upstreamOptionsFrom(up.Options(), newCfg))

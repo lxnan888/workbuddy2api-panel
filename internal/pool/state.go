@@ -544,14 +544,14 @@ type RealmHealth struct {
 	Cooling int
 	// Disabled 仅统计已禁用；Paused（暂停选号）单列——两者对监控口径不同：
 	// /status 与 /metrics 的「不可用」要合并（d+p）由调用方各自加。
-	Disabled       int
-	Paused         int
+	Disabled        int
+	Paused          int
 	ConcurrencyFull int
-	Breaker        int
-	Degraded       int
-	ManualDisabled int
-	ModelCooled    int
-	Concurrency    int
+	Breaker         int
+	Degraded        int
+	ManualDisabled  int
+	ModelCooled     int
+	Concurrency     int
 }
 
 // RealmHealth 返回某 realm 的账号健康分布；realm=="" 统计全池。
@@ -737,6 +737,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Concurrency:          int(e.inFlight.Load()),
 		ConcurrencyLimit:     p.concurrencyLimit(e),
 		ConcurrencyOverride:  e.concurrency,
+		Priority:             e.priority,
 		BreakerFails:         e.fails,
 		BreakerUntil:         e.breakerUntil,
 	}

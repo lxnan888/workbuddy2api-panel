@@ -38,6 +38,7 @@
 > | **并发等待队列** | 全部账号并发满时等待 `pool.concurrency_wait_timeout`（默认 30s），排队上限 `pool.concurrency_wait_queue`（默认 100）；排队满回 429 `gateway_queue_full`，等待超时回 429 `gateway_concurrency_limit`，完全没号回 503。 |
 > | **账号池筛选与静默刷新** | 顶部状态卡（账号总数 / 可用 / 冷却中 / 已禁用 / 已暂停选号）可点击筛选账号表，默认只显示「可用」；轮询刷新改为内容不变不动 DOM，表格内编辑/下拉操作期间不重建，消除闪烁与输入打断。 |
 > | **账号固定代理常显** | 账号「出口」下拉直接列出全部代理（随机 / 直连 / 固定代理），不再等 focus 才填充；每个账号可单独绑定固定代理。 |
+> | **账号优先级** | 账号表新增「优先级」列，可点击设置 `0–9999`（默认 `0`，数字越大越优先），写入 `state.json` 并实时生效。优先级是选号最高排序键：先收敛到最高优先级组，同组内才走快过期 / 模型成本分层 / 加权随机 / 轮询 / 顺序耗尽；高优先级号冷却、并发满、模型不可用或积分保底时立即降级；裸模型名跨域时两域一起比较，`preferred_realm` 仅在同优先级内决定先后，显式 `cn:` / `global:` 仍锁域；已有粘性绑定不被高优先级抢占，新会话按最高优先级分配。同时修复裸模型名粘性校验只查 CN 域、绑定到 Global 后下一轮被误判失效的问题（开启跨域回退时粘性校验/新分配合并两域）。 |
 > | **账号 JSON 导入扩展** | 「导入 JSON」自动识别三种形态：插件 OAuth 单对象（`auth` + `account` 嵌套，可直接导入桌面端凭证文件）、这类对象的数组、cockpit tools 数组；支持一次多选文件并汇总结果。导入后动作与 cockpit 一致：CN 签到、global 注册激活 + trial、查余额并自动解禁。 |
 > | **模型级阻塞状态码对齐** | 全池某模型 6004 限流 → 429 `model_rate_limited`（可退避重试）；全池 11102 / 11158 模型不可用 → 404 `model_not_found`（换模型才有用，原 400 `model_unavailable` 会让客户端误判为请求参数错误）；无可用账号 → 503 `no_healthy_account`。 |
 > | **配置全量热生效** | 除 `state_file` 外，提示词、超时、UA、上游 base、`max_payload_bytes`、`restriction_hold_seconds`、`listen`、`read_timeout`、`auth_dir`、`upstash`、`session_sticky.*`、日志归档、模型开关、并发等待等保存后立即生效；`listen`/`read_timeout` 进程内重建监听。 |
@@ -812,7 +813,7 @@ http://127.0.0.1:7863/panel/
 
 | 视图 | 功能 |
 |---|---|
-| **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、账号名内联编辑（写回 `auths/*.json`）、出口下拉（随机 / 直连 / 固定代理）、积分量条、成功·失败计数、并发、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
+| **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、账号名内联编辑（写回 `auths/*.json`）、出口下拉（随机 / 直连 / 固定代理）、积分量条、成功·失败计数、优先级（点击设置 0–9999，数字越大越优先）、并发（点击设置）、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
 | **代理池** | 总代理（容器级出口）配置与测试；代理批量导入、输入框预测试、编辑/启用/删除、单条检测与全部检测；代理表显示协议、脱敏地址、状态、延迟、最近检测、错误、绑定数；realm 默认出口与健康检查 URL/间隔/超时/阈值设置；账号池每行可单独指定出口，一个固定代理可服务多个账号 |
 | **用量** | 指标卡（请求数 / 总 token / prompt / completion / 失败尝试 / 平均延迟，含占比与吐字速率）+ **Token 时序图**（渐变堆叠柱、均值参考线、峰值标注、悬停看单桶明细）+ **用量明细**（按账号 / 按模型 / 按域切换，可按合计 Token / 请求数 / 失败数 / 平均延迟排序，含 prompt·completion 占比条）+ **积分扣除历史**（按账号 / 按模型，折算「积分 / 1M Token」） |
 | **积分构成** | **积分到期分布**（按批次到期日聚合，颜色区分账号）+ **账号对比**（按来源归并的面额 / 余额 / 包数卡片与混合构成条）+ 逐包明细（按到期日排序，默认展开最近到期的 `panel.package_detail_limit` 个，其余与已用完的包折叠） |
@@ -890,7 +891,7 @@ http://127.0.0.1:7863/panel/
 | 分组 | 端点 |
 |---|---|
 | 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET proxies` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
-| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove` · `nickname`；`PUT accounts/{uid}/proxy`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
+| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove` · `nickname`；`PUT accounts/{uid}/proxy` · `PUT accounts/{uid}/concurrency` · `PUT accounts/{uid}/priority`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
 | 代理池 | `POST proxies`（导入）· `POST proxies/test`（输入预测试）· `POST proxies/check`（全部检测）· `POST proxies/{id}/check`（单条检测）· `PUT proxies/global` · `POST proxies/global/check` · `PATCH/DELETE proxies/{id}` · `PUT proxies/health` · `PUT proxies/realm/{realm}` |
 | 补偿 | `GET compensation`（逐号查补偿状态，**只读**）；`POST accounts/{uid}/compensation`（单号领）；`POST compensation_all`（全量领，返回 `summary{claimed,skipped,errored,credit}`——**先看 `errored` 再看 `claimed`**，否则会把「全部查询失败」说成「没有待领补偿」） |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |

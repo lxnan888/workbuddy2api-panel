@@ -1,24 +1,32 @@
 package main
 
 import (
+	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
 )
 
-// realmAwareAvailableForModel 构造会话粘性路由按模型可用口径的 realm 感知闭包。
+// realmAwareAvailableForModel 构造会话粘性的两个账号列表闭包：
 //
-// 粘性分配的模型名可能带 realm 前缀（"global:gpt-5.4" / "cn:glm-5.2"）：必须按前缀剥出
-// realm + bareModel，再交给分池选号域过滤——否则裸名取池子全集，global 号会被粘性分配给
-// CN 前缀请求（跨 realm 泄漏）。裸名/显式 cn → cn 集合；global: → global 集合。
+//   - available：校验已绑定账号是否仍可用。**不按优先级过滤**（粘性优先），
+//     裸模型名且跨域回退开启时合并两域，避免绑定到另一域后被误判失效；
+//   - alloc：新会话分配候选。按账号优先级收敛到最高优先级组，同优先级内
+//     首选域优先；显式 cn:/global: 前缀只在该域内分配。
 //
-// realm 为空串时 pool.WeightedAvailableUIDsForModelRealm 退化为现状
-// （AvailableUIDsForModel），老调用（无前缀模型名）语义零改动。
-//
-// 返回列表可能对快过期账号重复同一 UID，作为虚拟实例权重；会话哈希分配无需感知
-// 权重细节，已有绑定的快路径仍直接返回原账号，不做迁移。
-func realmAwareAvailableForModel(p *pool.Pool) func(model string) []string {
-	return func(model string) []string {
-		realm, bare := server.ResolveModel(model)
-		return p.WeightedAvailableUIDsForModelRealm(bare, realm)
+// 粘性分配的模型名可能带 realm 前缀（"global:gpt-5.4" / "cn:glm-5.2"）：必须按
+// preferred_realm 解析裸名默认域，再交给分池选号域过滤——否则裸名取 cn 全集，
+// global 号会被粘性分配给 CN 前缀请求（跨 realm 泄漏）。live 为 nil 或尚未赋值时
+// 按零值快照（cn）处理；请求到达时 main 已完成 live 初始化。
+func realmAwareAvailableForModel(p *pool.Pool, live func() livecfg.Snapshot) (available, alloc func(model string) []string) {
+	resolve := func(model string) (realm, bare string, includeOther bool) {
+		realm, bare, explicit := server.ResolveModelDetail(model, live().PreferredRealm)
+		return realm, bare, !explicit && p.CrossDomainFallback()
 	}
+	return func(model string) []string {
+			realm, bare, includeOther := resolve(model)
+			return p.AvailableUIDsForModelRealms(bare, realm, includeOther)
+		}, func(model string) []string {
+			realm, bare, includeOther := resolve(model)
+			return p.WeightedAvailableUIDsForModelPriority(bare, realm, includeOther)
+		}
 }

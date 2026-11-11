@@ -229,6 +229,9 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .acc.md .mark { display: none; }
 /* 操作列用 width:1px + nowrap 的经典技巧：列宽恰为内容宽，其余列按内容自适应 */
 .acc .c-acts { width: 1px; white-space: nowrap; }
+/* 优先级列：0 保持普通字色；非零用强调色提示「这个号被手工提权」。 */
+.acc .pri { cursor: pointer; }
+.acc .pri.hi { color: var(--accent); font-weight: 650; }
 /* 档位标签列：允许换行在标签之间（不拆字），并给足最小宽度 */
 .acc .efs { min-width: 150px; }
 .acc .efs .tag { margin: 1px 0; }
@@ -722,7 +725,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
             <th>账号</th><th>出口</th><th>状态</th><th>积分</th>
-            <th>成功 / 失败</th><th>并发</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
+            <th>成功 / 失败</th><th>优先级</th><th>并发</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>
         </table>
@@ -1146,7 +1149,7 @@ socks5://user:pass@host:port"></textarea></label>
               <label class="fld"><span class="lb">国际版账号顺序（UID）</span>
                 <input name="international_account_order" placeholder="uid1, uid2, uid3"></label>
             </div>
-            <div class="hint">按地区独立热生效；未列出的账号按 UID 排序追加。指针按地区和模型分别保存。会话粘性、模型成本分层优先；有序策略等待冷却恢复，不提前试探。临时重试或并发占满不推进顺序耗尽的主账号。闲置与快过期积分权重仅用于加权随机。</div>
+            <div class="hint">按地区独立热生效；未列出的账号按 UID 排序追加。指针按地区和模型分别保存。账号优先级最高（已绑定的粘性会话除外）：先选最高优先级组，同组内再按模型成本分层、快过期积分、权重/顺序策略；高优先级号冷却/并发满/模型不可用时立即降级。有序策略等待冷却恢复，不提前试探；临时重试或并发占满不推进顺序耗尽的主账号。闲置与快过期积分权重仅用于加权随机。</div>
             <div class="grid3">
               <label class="fld"><span class="lb">并发满等待</span>
                 <input name="concurrency_wait_timeout" placeholder="30s">

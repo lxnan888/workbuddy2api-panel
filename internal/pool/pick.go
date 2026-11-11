@@ -15,45 +15,66 @@ import (
 // Pick 单一选号入口（无请求级轮换、无 realm 过滤，模型感知缺省账号级）。
 // 需要请求级轮换（tried）或分池（realm）时用 PickExcludingForRealm。
 func (p *Pool) Pick() *auth.Auth {
-	return p.pick(nil, "", "")
+	return p.pick(nil, "", "", false)
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
 // 挑选策略：healthy 账号中按权重取前 5 名，再在 Top5 内按同一权重加权随机抽签，
 // 意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
-	return p.pick(tried, "", "")
+	return p.pick(tried, "", "", false)
 }
 
 // PickExcludingForModel 模型感知选号：等同 PickExcluding，但对「6004 模型级冷却中的
 // 账号」进行模型豁免——请求模型与其 trigger 模型不同时视为可用（issue #31）。
 // reqModel 为空时即普通 PickExcluding（不影响既有调用语义）。
 func (p *Pool) PickExcludingForModel(tried map[string]bool, reqModel string) *auth.Auth {
-	return p.pick(tried, reqModel, "")
+	return p.pick(tried, reqModel, "", false)
 }
 
 // PickExcludingForRealm 模型感知 + 分池选号：候选集先按 Realm()==realm 过滤
 // （realm 空 = 不过滤，退化为 PickExcludingForModel），再按模型健康口径判定。
 // 供 handler 在 global/cn 双域下分流（global 模型请求只路由 global 账号）。
 func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm string) *auth.Auth {
-	return p.pick(tried, reqModel, realm)
+	return p.pick(tried, reqModel, realm, false)
+}
+
+// PickExcludingForModelRealms 裸模型名的跨域优先级选号：候选集同时包含首选域和
+// 另一域，先收敛到最高优先级组；同优先级时首选域优先，首选域没有可选项才用另一域。
+// 显式 cn:/global: 前缀的调用方不要用本方法（应传 PickExcludingForRealm 锁域）。
+// 禁用/冷却/并发满/积分保底/模型级冷却仍是硬过滤：高优先级号不可服务时立即降级。
+func (p *Pool) PickExcludingForModelRealms(tried map[string]bool, reqModel, preferredRealm string) *auth.Auth {
+	return p.pick(tried, reqModel, preferredRealm, true)
 }
 
 // pick 在 healthy 候选集中按权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效）。
-// realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）。
-func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
+// realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）；includeOther=true 时
+// 同时允许另一域（裸模型名跨域优先级），并在同优先级内优先 realm。
+func (p *Pool) pick(tried map[string]bool, reqModel, realm string, includeOther bool) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
-	realmOK := func(e *entry) bool { return realm == "" || e.a.Realm() == realm }
+	realmOK := func(e *entry) bool {
+		if realm == "" || includeOther {
+			return true
+		}
+		return e.a.Realm() == realm
+	}
 	healthyOf := func(e *entry) bool { return realmOK(e) && e.healthy(now) }
 	if reqModel != "" {
 		healthyOf = func(e *entry) bool { return realmOK(e) && e.healthyForModel(now, reqModel) }
 	}
 	// floorBlocked 积分保底拦截判定（实现在 floorBlockedForRealmModel，与粘性路径共用）：
 	// 触底 + 收费（本地实测台账 或 上游目录倍率）即拦；免费/未知倍率不受限。
-	floorBlocked := func(e *entry) bool { return p.floorBlockedForRealmModel(e, reqModel, realm, now) }
+	// 跨域候选按账号自身域查倍率（同名模型两域倍率可不同）。
+	floorBlocked := func(e *entry) bool {
+		r := realm
+		if includeOther {
+			r = e.a.Realm()
+		}
+		return p.floorBlockedForRealmModel(e, reqModel, r, now)
+	}
 	var cands []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
@@ -80,7 +101,22 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if p.strategyForRealmLocked(realm) != WeightedRandom {
 			return nil // 有序策略等待恢复，不提前试探仍在冷却中的账号。
 		}
-		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel)
+		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel, includeOther)
+	}
+	// 优先级是最高排序键：候选集先收敛到最高优先级组。禁用/冷却/并发满/保底/
+	// 模型级冷却已在上面作为硬过滤剔除；高优先级号不可服务时自然降级到下一组。
+	cands = maxPriorityCandidates(cands)
+	// 同优先级内首选域优先；首选域没有可选项时才用另一域（裸模型名跨域）。
+	if includeOther && realm != "" {
+		if pref := realmCandidates(cands, realm); len(pref) > 0 {
+			cands = pref
+		}
+	}
+	// 域偏好过滤后候选已归一到同一域（首选域或另一域）；有序策略指针与成本探索
+	// 按实际服务域记账，和原先两次 PickExcludingForRealm 的口径一致。
+	selRealm := realm
+	if includeOther && len(cands) > 0 {
+		selRealm = cands[0].a.Realm()
 	}
 	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
@@ -126,7 +162,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// 失败 → 既有错误策略照常，无探测风暴。
 	// hasTier1 复用本循环上方 costTier 的预计算口径（每候选一次的契约不变）。
 	// timer 同锁写入：并发 pick 串行进入写锁，只有一个进入者能通过窗口判定
-	//（天然防重复探索）。key = realm + "\x1f" + reqModel：同模型名可跨域，
+	//（天然防重复探索）。key = 实际服务域 + "\x1f" + reqModel：同模型名可跨域，
 	// 探索节奏按 (域, 模型) 独立；realm==""（Pick 老语义）单独成键。
 	if p.costExploreInterval > 0 && bestTier == 0 && reqModel != "" {
 		for _, e := range cands {
@@ -135,7 +171,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 				break
 			}
 		}
-		key := realm + "\x1f" + reqModel
+		key := selRealm + "\x1f" + reqModel
 		if hasTier1 && now.Sub(p.exploreLast[key]) >= p.costExploreInterval {
 			p.exploreLast[key] = now
 			p.costExploreEvents++
@@ -159,17 +195,17 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			ws = append(ws, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
 		}
 	}
-	if strategy := p.strategyForRealmLocked(realm); strategy != WeightedRandom {
+	if strategy := p.strategyForRealmLocked(selRealm); strategy != WeightedRandom {
 		ordered := make([]*entry, 0, len(ws))
 		for _, w := range ws {
 			ordered = append(ordered, w.e)
 		}
-		e := p.pickOrderedLocked(ordered, tried, reqModel, realm, strategy, explored, now)
+		e := p.pickOrderedLocked(ordered, tried, reqModel, selRealm, strategy, explored, includeOther, now)
 		e.lastUsed = now
 		p.pickSeq++
 		e.usedSeq = p.pickSeq
 		if explored {
-			log.Printf("[pool] cost explore model=%s realm=%q acct=%s window=%s", reqModel, realm, logfmt.Label(e.a.UID, e.a.Nickname), p.costExploreInterval)
+			log.Printf("[pool] cost explore model=%s realm=%q acct=%s window=%s", reqModel, selRealm, logfmt.Label(e.a.UID, e.a.Nickname), p.costExploreInterval)
 		}
 		return e.a
 	}
@@ -312,13 +348,13 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 // 这里，若兜底不看保底，触底号会被「捞回来」继续接收费模型——表现为同一条
 // floor WARN 反复刷同一个号（实测：credits=1 < floor=150 仍持续中选）。
 // 兜底是**最后一道**选号路径，保底在它之前挡不住就等于没挡。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string) *auth.Auth {
-	var best *entry
+func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string, includeOther bool) *auth.Auth {
+	var cands []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
 		}
-		if realm != "" && e.a.Realm() != realm {
+		if !includeOther && realm != "" && e.a.Realm() != realm {
 			continue // 域过滤：池内跨 realm 的冷却账号不参与本 realm 兜底
 		}
 		if e.disabled || e.paused {
@@ -327,24 +363,38 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
 		}
-		if p.floorBlockedForRealmModel(e, model, realm, now) {
+		floorRealm := realm
+		if includeOther {
+			floorRealm = e.a.Realm()
+		}
+		if p.floorBlockedForRealmModel(e, model, floorRealm, now) {
 			continue // 积分保底：触底号不接收费模型（兜底路径同判据）
 		}
 		if p.concurrencyFull(e) {
 			continue
 		}
-		exp := e.expiry(now)
-		if exp.IsZero() {
+		if e.expiry(now).IsZero() {
 			continue
 		}
-		if best == nil || exp.Before(best.expiry(now)) {
+		cands = append(cands, e)
+	}
+	if len(cands) == 0 {
+		return nil
+	}
+	// 兜底同样以优先级为最高键；同优先级内首选域优先，其次最早到期。
+	cands = maxPriorityCandidates(cands)
+	if includeOther && realm != "" {
+		if pref := realmCandidates(cands, realm); len(pref) > 0 {
+			cands = pref
+		}
+	}
+	best := cands[0]
+	for _, e := range cands[1:] {
+		if e.expiry(now).Before(best.expiry(now)) {
 			best = e
 		}
 	}
-	if best == nil {
-		return nil
-	}
-	log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s", logfmt.Label(best.a.UID, best.a.Nickname), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
+	log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s priority=%d until=%s kind=%s", logfmt.Label(best.a.UID, best.a.Nickname), best.priority, best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
 	best.lastUsed = time.Now()
 	// 兜底同样是「选中」，必须与 pick() 正常路径、粘性命中路径（PickByUIDForModel）
 	// 一样推进 usedSeq/pickSeq：否则被兜底反复选中的账号 usedSeq 恒为 0，在 pick 的
@@ -353,6 +403,38 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 	p.pickSeq++
 	best.usedSeq = p.pickSeq
 	return best.a
+}
+
+// maxPriorityCandidates 只保留优先级最高的一组候选（原地过滤）。调用方已完成
+// 健康/保底/并发/模型级冷却等硬过滤；优先级只在这些可服务账号之间排序。
+func maxPriorityCandidates(cands []*entry) []*entry {
+	if len(cands) == 0 {
+		return cands
+	}
+	maxPri := cands[0].priority
+	for _, e := range cands[1:] {
+		if e.priority > maxPri {
+			maxPri = e.priority
+		}
+	}
+	out := cands[:0]
+	for _, e := range cands {
+		if e.priority == maxPri {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// realmCandidates 只保留指定域候选；用于跨域同优先级内「首选域优先」。
+func realmCandidates(cands []*entry, realm string) []*entry {
+	out := make([]*entry, 0, len(cands))
+	for _, e := range cands {
+		if e.a.Realm() == realm {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // concurrencyFull 报告账号是否已占满在途名额（上限按 realm 分档，见 concurrencyLimit；

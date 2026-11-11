@@ -7,7 +7,7 @@ let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
 /* 代理池视图状态：代理快照、编辑中的代理、正在内联改名的账号。 */
-let proxyData = null, proxyLoading = false, proxyEditID = '', editingNameUID = '', editingConcUID = '';
+let proxyData = null, proxyLoading = false, proxyEditID = '', editingNameUID = '', editingConcUID = '', editingPriUID = '';
 let logPin = true, loginState = null, loginTimer = null;
 let refTimer = null;
 /* 视图级筛选状态（模块级声明放在文件顶部，避免顶层 go() 早于声明执行时踩 TDZ）。 */
@@ -402,7 +402,7 @@ function accCoolLeft(s) {
 function renderAccounts(list) {
   const tb = $('accBody');
   // 内联改名/改并发期间不让 5 秒轮询重建表格（否则输入框会被冲掉）。
-  if (editingNameUID || editingConcUID) return;
+  if (editingNameUID || editingConcUID || editingPriUID) return;
   // 焦点在表格内（下拉展开/正在选择）时不重建，避免操作被打断。
   if (document.activeElement && tb && tb.contains(document.activeElement)) return;
   let rows = list || [];
@@ -479,6 +479,7 @@ function renderAccounts(list) {
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
+      '<td class="num pri' + ((s.priority || 0) > 0 ? ' hi' : '') + '" data-uid="' + esc(s.uid) + '" data-priority="' + (s.priority || 0) + '" title="点击修改优先级：数字越大越优先，0 = 默认；同优先级按快过期/成本/权重/顺序策略">' + (s.priority || 0) + '</td>' +
       '<td class="num conc" data-uid="' + esc(s.uid) + '" data-override="' + (s.concurrency_override || 0) + '" data-limit="' + (s.concurrency_limit || 0) + '" title="点击修改并发（当前/上限；0 = 按域默认）">' + (s.concurrency || 0) + ' / ' + (s.concurrency_limit || 0) + '</td>' +
       '<td class="num usage-cell" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +
         '<span class="usage-item usage-count"><b>' + req + '</b><em>次</em></span>' +
@@ -928,6 +929,43 @@ function startAccountConcurrency(uid, override, el) {
   input.select();
 }
 
+function startAccountPriority(uid, priority, el) {
+  if (!el || editingPriUID) return;
+  editingPriUID = uid;
+  const old = el.innerHTML;
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.min = '0';
+  input.max = '9999';
+  input.step = '1';
+  input.value = String(priority || 0);
+  input.title = '数字越大越优先，0 = 默认；同优先级按快过期/成本/权重/顺序策略';
+  input.style.width = '100%';
+  el.innerHTML = '';
+  el.appendChild(input);
+  let cancelled = false;
+  const finish = async () => {
+    if (cancelled) return;
+    const val = Number(input.value);
+    editingPriUID = '';
+    try {
+      const r = await api('accounts/' + encodeURIComponent(uid) + '/priority', {
+        method: 'PUT',
+        body: JSON.stringify({ priority: Number.isFinite(val) ? val : 0 }),
+      });
+      toast('优先级已更新：' + r.priority + '（数字越大越优先）', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    loadOverview(true);
+  };
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancelled = true; editingPriUID = ''; el.innerHTML = old; }
+  });
+  input.addEventListener('blur', finish);
+  input.focus();
+  input.select();
+}
+
 function startAccountRename(uid, name, el) {
   if (!el || editingNameUID) return;
   editingNameUID = uid;
@@ -967,6 +1005,11 @@ $('accBody').addEventListener('click', ev => {
   const cc = ev.target.closest('.conc[data-uid]');
   if (cc && !ev.target.closest('input')) {
     startAccountConcurrency(cc.dataset.uid, Number(cc.dataset.override || 0), cc);
+    return;
+  }
+  const pc = ev.target.closest('.pri[data-uid]');
+  if (pc && !ev.target.closest('input')) {
+    startAccountPriority(pc.dataset.uid, Number(pc.dataset.priority || 0), pc);
   }
 });
 

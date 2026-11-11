@@ -43,6 +43,12 @@ func resolveModel(model string) (realm, bare string) {
 // ResolveModel 是 resolveModel 的导出面（跨包调用）。
 func ResolveModel(model string) (realm, bare string) { return resolveModel(model) }
 
+// ResolveModelDetail 是 resolveModelDetailDefault 的导出面：调用方可传入
+// pool.preferred_realm 作为裸名默认域，并拿到 realmExplicit（显式前缀判定）。
+func ResolveModelDetail(model, defaultRealm string) (realm, bare string, realmExplicit bool) {
+	return resolveModelDetailDefault(model, defaultRealm)
+}
+
 // otherRealm 返回另一个选号域（"cn" ↔ "global"），供跨域回退使用。
 func otherRealm(realm string) string {
 	if realm == "global" {

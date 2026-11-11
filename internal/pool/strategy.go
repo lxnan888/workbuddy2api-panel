@@ -108,7 +108,7 @@ func (p *Pool) restoreSchedulingLocked(cursors map[string]scheduleCursor) {
 // pickOrderedLocked 接收已完成健康、保底、在途与成本层过滤的全量候选。
 // 临时 tried/在途占满/成本探索可借用其他账号，但不推进顺序耗尽的主账号。
 // 调用方持 p.mu；指针按 (realm, model) 隔离，并通过既有快照机制持久化。
-func (p *Pool) pickOrderedLocked(cands []*entry, tried map[string]bool, model, realm, strategy string, explored bool, now time.Time) *entry {
+func (p *Pool) pickOrderedLocked(cands []*entry, tried map[string]bool, model, realm, strategy string, explored, includeOther bool, now time.Time) *entry {
 	order := p.accountOrder.Domestic
 	if realm == "global" {
 		order = p.accountOrder.International
@@ -159,7 +159,7 @@ func (p *Pool) pickOrderedLocked(cands []*entry, tried map[string]bool, model, r
 	advance := true
 	if strategy == SequentialExhaust && cursor.UID != "" {
 		current := p.byUID[cursor.UID]
-		if current != nil && current.a.Realm() == realm && current.healthyForModel(now, model) &&
+		if current != nil && (includeOther || current.a.Realm() == realm) && current.healthyForModel(now, model) &&
 			!p.floorBlockedForRealmModel(current, model, realm, now) &&
 			(explored || tried[cursor.UID] || p.concurrencyFull(current)) {
 			advance = false

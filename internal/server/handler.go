@@ -107,18 +107,18 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		return h.cfg.Live.Load()
 	}
 	return livecfg.Snapshot{
-		APIKey:           h.cfg.APIKey,
-		SoftCooldown:     h.cfg.SoftCooldown,
-		RecordClientInfo: h.cfg.RecordClientInfo,
-		HiddenModels:     livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
-		PromptMode:       h.cfg.PromptMode,
-		PromptText:       h.cfg.PromptText,
-		MaxPayloadBytes:  h.cfg.MaxPayloadBytes,
-		RestrictionHold:  h.cfg.RestrictionHold,
-		GlobalEnabled:    h.cfg.GlobalEnabled,
-		EmbeddingsEnabled: h.cfg.EmbeddingsEnabled,
+		APIKey:                h.cfg.APIKey,
+		SoftCooldown:          h.cfg.SoftCooldown,
+		RecordClientInfo:      h.cfg.RecordClientInfo,
+		HiddenModels:          livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
+		PromptMode:            h.cfg.PromptMode,
+		PromptText:            h.cfg.PromptText,
+		MaxPayloadBytes:       h.cfg.MaxPayloadBytes,
+		RestrictionHold:       h.cfg.RestrictionHold,
+		GlobalEnabled:         h.cfg.GlobalEnabled,
+		EmbeddingsEnabled:     h.cfg.EmbeddingsEnabled,
 		WatermarkStripEnabled: h.cfg.WatermarkStripEnabled,
-		RecordContext:     h.cfg.RecordContext,
+		RecordContext:         h.cfg.RecordContext,
 	}
 }
 
@@ -168,15 +168,15 @@ func (h *Handler) waitForConcurrency(ctx context.Context, model, realm string, c
 	}
 	backoff := 100 * time.Millisecond
 	for {
-		realms := []string{realm}
+		// 裸名跨域时两域一起按优先级取最高组；显式前缀只等本域。
+		var acct *auth.Auth
 		if crossRealm {
-			realms = append(realms, otherRealm(realm))
+			acct = h.cfg.Pool.PickExcludingForModelRealms(nil, model, realm)
+		} else {
+			acct = h.cfg.Pool.PickExcludingForRealm(nil, model, realm)
 		}
-		for _, r := range realms {
-			acct := h.cfg.Pool.PickExcludingForRealm(nil, model, r)
-			if acct != nil && h.cfg.Pool.Acquire(acct.UID) {
-				return acct, ""
-			}
+		if acct != nil && h.cfg.Pool.Acquire(acct.UID) {
+			return acct, ""
 		}
 		if ctx.Err() != nil {
 			return nil, "canceled"
@@ -391,11 +391,11 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
 	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"accounts":       h.cfg.Pool.List(),
-		"total":          total,
-		"healthy":        healthy,
-		"cooling":        cooling,
-		"disabled":       disabled,
+		"accounts":         h.cfg.Pool.List(),
+		"total":            total,
+		"healthy":          healthy,
+		"cooling":          cooling,
+		"disabled":         disabled,
 		"concurrency_full": concurrencyFull,
 		// realm_totals 按域分组的计数汇总（双 realm 并存时运维一眼看到各域可用性）：
 		// 只新增字段，既有 total/healthy/cooling/disabled/concurrency_full 汇总键不变（零回归）。
@@ -1060,20 +1060,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if acct == nil {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
-			// （healthyForModel），realm 谓词过滤跨域账号。
-			pickRealm := realm
-			if crossRealm && h.cfg.Pool.ServableForModelRealm(bareModel, realm) == 0 &&
-				h.cfg.Pool.ServableForModelRealm(bareModel, otherRealm(realm)) > 0 {
-				// 首选域此刻没有真正可服务的号（11102 模型级负缓存 / 账号级冷却 /
-				// 在途占满），而另一域有 → 直接换域选号（issue #135）。先看健康度再选，
-				// 避免拿全冷却兜底捞回来的旧域账号白撞一次上游。
-				pickRealm = otherRealm(realm)
-			}
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, pickRealm)
-			if acct == nil && crossRealm {
-				// 该域选不到（并发抢名额/轮换耗尽/另一域刚冷却完）→ 另一域再试一次，
-				// 保持尽力而为语义；tried 已记录失败号，轮转仍由 MaxRotate 封顶。
-				acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, otherRealm(pickRealm))
+			// （healthyForModel）。裸名跨域开启时两域一起按优先级选：最高优先级
+			// 号在哪个域就用哪个域，同优先级内首选域优先；高优先级号不可服务
+			// （冷却/并发满/模型级冷却/积分保底）时立即降级，不等待。显式
+			// cn:/global: 前缀 crossRealm=false，仍严格锁域。
+			if crossRealm {
+				acct = h.cfg.Pool.PickExcludingForModelRealms(tried, bareModel, realm)
+			} else {
+				acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
 			}
 		}
 		if acct == nil {

@@ -264,6 +264,8 @@ const (
 	defaultConcurrencyCN     = 3
 	defaultConcurrencyGlobal = 2
 	maxAccountConcurrency    = 64
+	// MaxAccountPriority 账号优先级上限（0–9999，数字越大越优先）。
+	MaxAccountPriority = 9999
 )
 
 // SetDefaultConcurrency 设置未单独覆盖账号的默认并发（测试/兼容用；0 = 按域默认）。
@@ -305,6 +307,37 @@ func (p *Pool) AccountConcurrency(uid string) (current int64, limit int, ok bool
 		return 0, 0, false
 	}
 	return e.inFlight.Load(), p.concurrencyLimit(e), true
+}
+
+// SetAccountPriority 设置单账号优先级（0–9999，数字越大越优先）。
+// 返回 false 表示账号不存在。变更立即生效并标记待落盘。
+func (p *Pool) SetAccountPriority(uid string, n int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	if n < 0 {
+		n = 0
+	}
+	if n > MaxAccountPriority {
+		n = MaxAccountPriority
+	}
+	e.priority = n
+	p.dirty.Store(true)
+	return true
+}
+
+// AccountPriority 返回账号优先级；ok=false 表示账号不存在。
+func (p *Pool) AccountPriority(uid string) (int, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return 0, false
+	}
+	return e.priority, true
 }
 
 // concurrencyLimit 报告账号的生效并发上限：覆盖值 >0 用它，否则按域默认
