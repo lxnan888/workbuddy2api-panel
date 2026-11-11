@@ -1462,8 +1462,8 @@ socks5://user:pass@host:port"></textarea></label>
       </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。文件需为账号数组格式。</div>
-        <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
+        <div class="hint" style="margin-bottom:8px">选择 JSON 文件（可多选）。支持插件 OAuth 单对象、对象数组，以及 cockpit tools 导出的账号数组，格式自动识别。</div>
+        <input type="file" id="importFile" accept=".json" multiple style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
       </div>

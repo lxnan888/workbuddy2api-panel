@@ -1807,28 +1807,42 @@ $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
 $('importFile').onchange = async () => {
-  const file = $('importFile').files[0];
-  if (!file) return;
+  const files = Array.from($('importFile').files || []);
+  if (!files.length) return;
   $('importDone').hidden = true; $('importErr').hidden = true;
-  const fd = new FormData();
-  fd.append('file', file);
   const h = {};
   const k = localStorage.getItem(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
-  try {
-    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    $('importDone').hidden = false;
-    $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
-    if (d.errors && d.errors.length) {
-      console.warn('import errors:', d.errors);
+  let imported = 0, skipped = 0, failed = 0;
+  const errs = [];
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      imported += d.imported || 0;
+      skipped += d.skipped || 0;
+      if (d.errors && d.errors.length) errs.push(...d.errors.map(x => file.name + '：' + x));
+    } catch (e) {
+      failed++;
+      errs.push(file.name + '：' + e.message);
     }
-    loadOverview(true);
-  } catch (e) {
-    $('importErr').hidden = false;
-    $('importErr').textContent = '导入失败：' + e.message;
   }
+  if (imported || skipped) {
+    $('importDone').hidden = false;
+    $('importDone').textContent = '导入完成：成功 ' + imported + ' 个' +
+      (skipped ? '，跳过 ' + skipped + ' 个' : '') +
+      (files.length > 1 ? '，共 ' + files.length + ' 个文件' : '');
+  }
+  if (failed || errs.length) {
+    $('importErr').hidden = false;
+    $('importErr').textContent = (failed ? failed + ' 个文件导入失败：' : '部分账号跳过：') +
+      errs.slice(0, 3).join('；') + (errs.length > 3 ? '；等 ' + errs.length + ' 条' : '');
+  }
+  if (errs.length) console.warn('import errors:', errs);
+  loadOverview(true);
   $('importFile').value = '';
 };
 

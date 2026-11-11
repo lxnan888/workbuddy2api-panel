@@ -38,6 +38,7 @@
 > | **并发等待队列** | 全部账号并发满时等待 `pool.concurrency_wait_timeout`（默认 30s），排队上限 `pool.concurrency_wait_queue`（默认 100）；排队满回 429 `gateway_queue_full`，等待超时回 429 `gateway_concurrency_limit`，完全没号回 503。 |
 > | **账号池筛选与静默刷新** | 顶部状态卡（账号总数 / 可用 / 冷却中 / 已禁用 / 已暂停选号）可点击筛选账号表，默认只显示「可用」；轮询刷新改为内容不变不动 DOM，表格内编辑/下拉操作期间不重建，消除闪烁与输入打断。 |
 > | **账号固定代理常显** | 账号「出口」下拉直接列出全部代理（随机 / 直连 / 固定代理），不再等 focus 才填充；每个账号可单独绑定固定代理。 |
+> | **账号 JSON 导入扩展** | 「导入 JSON」自动识别三种形态：插件 OAuth 单对象（`auth` + `account` 嵌套，可直接导入桌面端凭证文件）、这类对象的数组、cockpit tools 数组；支持一次多选文件并汇总结果。导入后动作与 cockpit 一致：CN 签到、global 注册激活 + trial、查余额并自动解禁。 |
 > | **模型级阻塞状态码对齐** | 全池某模型 6004 限流 → 429 `model_rate_limited`（可退避重试）；全池 11102 / 11158 模型不可用 → 404 `model_not_found`（换模型才有用，原 400 `model_unavailable` 会让客户端误判为请求参数错误）；无可用账号 → 503 `no_healthy_account`。 |
 > | **配置全量热生效** | 除 `state_file` 外，提示词、超时、UA、上游 base、`max_payload_bytes`、`restriction_hold_seconds`、`listen`、`read_timeout`、`auth_dir`、`upstash`、`session_sticky.*`、日志归档、模型开关、并发等待等保存后立即生效；`listen`/`read_timeout` 进程内重建监听。 |
 > | **请求管线增强** | 出站模型剥 realm 前缀；目录 `max_output_tokens` 补缺省额度；字符串 `stop` 归一化为数组；`prompt.keep_recent_rounds` 历史裁剪；思考档位输出预算下限；工具描述脱敏；`prompt_cache_key` 改为 UUID v4 形态；补会话轮级字段；chat body gzip 与 RPC gzip/deflate/br 解码。 |
@@ -820,7 +821,7 @@ http://127.0.0.1:7863/panel/
 | **配置** | 在线编辑 config.json：服务（监听地址 / API 密钥 / 单账号明细条数）、定时任务（签到 / 保活 / 旅行 / 活跃 / 成长任务五类时点与开关 + 余额刷新间隔）、账号池与流量治理、上游与高级（超时 / 出站 UA / 提示词模式 / 指纹脱敏 / 粘性路由）、日志（调用来源记录开关） |
 | **运行日志** | **请求记录表**（时间 / 结果 / 模型 / 账号 / **来源 IP** / **User-Agent** / 耗时 / Token / 积分 / 请求 ID），支持按 IP·UA·模型·账号·请求 ID 与结果筛选、读取条数、时间范围；下方 **运行日志** 按「任务 / 对话 / 系统」分频道，可开关自动滚动；新增 **积分历史**（每次真实查到余额与上次比对，变动即留痕） |
 
-顶部另有「刷新」（向上游全量查询真实余额并回写；5 秒自动轮询只读内存，不打上游）与「添加账号」（浏览器内完成 OAuth 设备授权：显示授权链接 + 自动轮询，登录后凭证落盘并**热加载进池，免重启**，也支持导入 cockpit tools 导出的 JSON）。
+顶部另有「刷新」（向上游全量查询真实余额并回写；5 秒自动轮询只读内存，不打上游）与「添加账号」（浏览器内完成 OAuth 设备授权：显示授权链接 + 自动轮询，登录后凭证落盘并**热加载进池，免重启**，也支持导入 JSON：插件 OAuth 单对象、对象数组、cockpit tools 数组自动识别，可一次选多个文件）。
 
 ### 代理池与总代理
 
@@ -893,7 +894,7 @@ http://127.0.0.1:7863/panel/
 | 代理池 | `POST proxies`（导入）· `POST proxies/test`（输入预测试）· `POST proxies/check`（全部检测）· `POST proxies/{id}/check`（单条检测）· `PUT proxies/global` · `POST proxies/global/check` · `PATCH/DELETE proxies/{id}` · `PUT proxies/health` · `PUT proxies/realm/{realm}` |
 | 补偿 | `GET compensation`（逐号查补偿状态，**只读**）；`POST accounts/{uid}/compensation`（单号领）；`POST compensation_all`（全量领，返回 `summary{claimed,skipped,errored,credit}`——**先看 `errored` 再看 `claimed`**，否则会把「全部查询失败」说成「没有待领补偿」） |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
-| 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
+| 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit`（账号 JSON 导入，三种形态自动识别） |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
 
 账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。
