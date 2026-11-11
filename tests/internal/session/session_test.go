@@ -109,23 +109,24 @@ func TestTTLExpiryReassigns(t *testing.T) {
 	}
 }
 
-func TestBoundAccountCooldownReassigns(t *testing.T) {
+func TestBoundAccountCooldownPreservesBinding(t *testing.T) {
 	r := routerWith(newCountingStore(), []string{"a1"}, time.Minute)
 	u1, _ := r.Resolve("c1")
 	if u1 != "a1" {
 		t.Fatalf("initial bind=%s want a1", u1)
 	}
-	// a1 冷却 → 可用列表只剩 a2 → 重新分配必须换到 a2。
+	// a1 冷却 → 绑定保留、本次不可用（调用方临时走普通轮换），不删绑重分配。
 	r.cfg.Available = func() []string { return []string{"a2"} }
-	u2, ok := r.Resolve("c1")
-	if !ok {
-		t.Fatal("resolve should succeed with fallback account")
+	if u2, ok := r.Resolve("c1"); ok {
+		t.Fatalf("cooldown binding should be preserved, got ok uid=%s", u2)
 	}
-	if u2 == u1 {
-		t.Fatalf("bound account %s cooled but still assigned", u1)
+	if r.Count() != 1 {
+		t.Fatalf("binding should be kept, count=%d", r.Count())
 	}
-	if u2 != "a2" {
-		t.Fatalf("reassigned to %s want a2", u2)
+	// 原号恢复 → 自动切回。
+	r.cfg.Available = func() []string { return []string{"a1"} }
+	if u3, ok := r.Resolve("c1"); !ok || u3 != "a1" {
+		t.Fatalf("recovered binding=%s ok=%v want a1", u3, ok)
 	}
 }
 

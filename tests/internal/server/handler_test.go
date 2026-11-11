@@ -61,7 +61,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// bindStore 记录粘性绑定镜像调用（不联网），供 D4 端到端断言绑定收敛到最终成功号。
+// bindStore 记录粘性绑定镜像调用（不联网），供端到端断言绑定保留/收敛行为。
 type bindStore struct {
 	redisstore.Noop
 	mu     sync.Mutex
@@ -560,8 +560,9 @@ func TestNewHandlerSoftCooldownDefault(t *testing.T) {
 	}
 }
 
-// TestChatStickyFollowsFinalSuccess 端到端验证 D4：粘性号失败换号成功后，会话绑定收敛到成功号。
-func TestChatStickyFollowsFinalSuccess(t *testing.T) {
+// TestChatStickyPreservedOnFailureAndReturns 粘性号临时失败 → 本请求换号成功但
+// **保留原绑定**（不改绑）；原号恢复后下一轮自动切回。
+func TestChatStickyPreservedOnFailureAndReturns(t *testing.T) {
 	st := newBindStore()
 	sess := session.New(session.Config{
 		TTL:       time.Minute,
@@ -572,9 +573,11 @@ func TestChatStickyFollowsFinalSuccess(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	// 先把会话预绑定到 bad（模拟历史粘性），bad 失败、good 成功 → 绑定应切到 good。
+	selected := ""
+	badOK := false
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		if authz == "Bearer at-bad" {
+		selected = strings.TrimPrefix(authz, "Bearer ")
+		if authz == "Bearer at-bad" && !badOK {
 			return 500, `{"code":500}`, false
 		}
 		return 200, sseOK, true
@@ -585,7 +588,6 @@ func TestChatStickyFollowsFinalSuccess(t *testing.T) {
 		Session:      sess,
 		SoftCooldown: time.Minute,
 	})
-	// 预绑定：sess.Bind("conv-1", "bad")，然后请求体带同 conversation_id。
 	sess.Bind("conv-1", "bad")
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
 	rec := httptest.NewRecorder()
@@ -593,9 +595,24 @@ func TestChatStickyFollowsFinalSuccess(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
-	// 绑定必须收敛到最终成功的 good。
-	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
-		t.Fatalf("sticky binding should follow final success to good, got %s ok=%v (binds=%v)", uid, ok, st.binds)
+	if selected != "at-good" {
+		t.Fatalf("temporary failure should fall back to good, selected=%s", selected)
+	}
+	// 临时故障保留原绑定，不收敛到成功号。
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "bad" {
+		t.Fatalf("sticky binding should stay on bad, got %s ok=%v (binds=%v)", uid, ok, st.binds)
+	}
+
+	// 原号恢复：下一轮自动切回 bad。
+	badOK = true
+	selected = ""
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`)))
+	if rec.Code != 200 || selected != "at-bad" {
+		t.Fatalf("recovered sticky should be used again: code=%d selected=%s body=%s", rec.Code, selected, rec.Body)
+	}
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "bad" {
+		t.Fatalf("binding should remain bad, got %s ok=%v", uid, ok)
 	}
 }
 
@@ -624,8 +641,8 @@ func TestChatStickySuccessKeepsBinding(t *testing.T) {
 	}
 }
 
-// TestChatStickyFullFallsBackToRotation 端到端验证 C3 语义：粘性号满载不可用时，
-// 请求在同一轮内解绑并回落普通轮换选中健康账号，绑定收敛到最终成功号——而非空耗一轮。
+// TestChatStickyFullFallsBackToRotation 粘性号满载不可用时，本请求回落普通轮换，
+// 但**保留原绑定**；粘性号空出名额后下一轮自动切回。
 func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 	st := newBindStore()
 	sess := session.New(session.Config{
@@ -637,11 +654,13 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	// bad 占满唯一在途名额：PickByUID 将返回 nil（healthy 但 inFlight 满）→ 解绑 + 回落轮换。
+	// bad 占满唯一在途名额：PickByUID 返回 nil（healthy 但 inFlight 满）→ 临时借用 good。
 	p.SetDefaultConcurrency(1)
 	p.Acquire("bad")
 
+	selected := ""
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		selected = strings.TrimPrefix(authz, "Bearer ")
 		return 200, sseOK, true
 	})
 	h := NewHandler(Config{
@@ -654,14 +673,22 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	if rec.Code != 200 || selected != "at-good" {
+		t.Fatalf("full sticky should fall back to good: code=%d selected=%s body=%s", rec.Code, selected, rec.Body)
 	}
-	// 满载粘性号被解绑，绑定收敛到最终成功号 good。
-	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
-		t.Fatalf("sticky binding should fall back to good, got %s ok=%v (binds=%v)", uid, ok, st.binds)
+	// 满载只是临时故障：保留原绑定，不收敛到 good。
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "bad" {
+		t.Fatalf("sticky binding should stay on bad, got %s ok=%v (binds=%v)", uid, ok, st.binds)
 	}
+
+	// bad 空出名额：下一轮自动切回。
 	p.Release("bad")
+	selected = ""
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`)))
+	if rec.Code != 200 || selected != "at-bad" {
+		t.Fatalf("recovered sticky should be used again: code=%d selected=%s body=%s", rec.Code, selected, rec.Body)
+	}
 }
 
 func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {

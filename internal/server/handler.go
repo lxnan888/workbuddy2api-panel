@@ -142,6 +142,24 @@ func (h *Handler) sessionRouter() *session.Router {
 	return h.cfg.Session
 }
 
+// stickyBindingPreservable 判断当前不可用的粘性绑定是否只是临时故障：
+//   - 账号已删除、已禁用，或显式域不匹配 → 永久失效，应解绑；
+//   - 冷却 / 熔断 / 连败降权 / 并发满 / 模型级限流 / 暂停选号 / 积分保底
+//     都可恢复 → 保留绑定，本请求临时走普通轮换，原号恢复后自动切回。
+func (h *Handler) stickyBindingPreservable(uid, realm string, crossRealm bool) bool {
+	if h == nil || h.cfg.Pool == nil || uid == "" {
+		return false
+	}
+	st, ok := h.cfg.Pool.Status(uid)
+	if !ok || st.Disabled {
+		return false
+	}
+	if !crossRealm && realm != "" && st.Realm != realm {
+		return false
+	}
+	return true
+}
+
 // softCooldown 返回当前生效的软冷却基数（热改优先，<=0 回退默认）。
 func (h *Handler) softCooldown() time.Duration {
 	if d := h.loadLive().SoftCooldown; d > 0 {
@@ -842,15 +860,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
 	sessKey := session.ExtractKey(body)
 	stickyUID := ""
+	preserveSticky := false
 	if h.sessionRouter() != nil && sessKey != "" {
-		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
-		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
-		resolve := h.sessionRouter().ResolveForModel
+		// 按模型解析：绑定号在**当前模型**不可用（6004/11102/冷却/并发满/保底）时，
+		// 不删绑重分配，而是保留绑定 + 本请求临时轮换；原号在 TTL 内恢复后自动切回。
+		// 永久失效（账号删除/禁用/显式域不符）才解绑。
+		var uid string
+		var ok, preserved bool
 		if h.cfg.Pool.StrategyForRealm(realm) != pool.WeightedRandom {
-			resolve = h.sessionRouter().LookupForModel
+			uid, ok, preserved = h.sessionRouter().LookupForModelState(sessKey, peek.Model)
+		} else {
+			uid, ok, preserved = h.sessionRouter().ResolveForModelState(sessKey, peek.Model)
 		}
-		if uid, ok := resolve(sessKey, peek.Model); ok {
+		if ok {
 			stickyUID = uid
+		} else if preserved {
+			if h.stickyBindingPreservable(uid, realm, crossRealm) {
+				preserveSticky = true
+			} else {
+				h.sessionRouter().Unbind(sessKey)
+			}
 		}
 	}
 
@@ -879,7 +908,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			heldUID = ""
 		}
 	}
-	// unbindSticky 解绑当前会话粘性号（stickyUID 非空时）。供「粘性号不可用/被抢」与 fail 共用。
+	// unbindSticky 永久解绑当前会话粘性号（账号删除/禁用/显式域不符）。
+	// 临时故障走 preserveSticky：绑定保留、本次请求临时换号，成功也不改绑。
 	// 幂等：stickyUID 已空则空操作；不会误解绑其他轮的绑定。仅当 Session != nil 时 stickyUID 才会非空。
 	unbindSticky := func() {
 		if stickyUID != "" {
@@ -887,11 +917,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			stickyUID = ""
 		}
 	}
-	// fail 在轮转失败分支统一：释放租约 + 若失败号正是粘性号则解绑（下次请求重新分配）。
+	// fail 在轮转失败分支统一：释放租约 + 粘性号失败时按「临时保留 / 永久解绑」处理。
+	// 临时故障（冷却/并发满/模型限流等）保留原绑定，本请求换号成功后也不改绑；
+	// 账号已禁用/删除则永久解绑，下次请求重新分配。
 	fail := func(uid string) {
 		releaseHeld()
 		if stickyUID != "" && uid == stickyUID {
-			unbindSticky()
+			if h.stickyBindingPreservable(stickyUID, realm, crossRealm) {
+				preserveSticky = true
+				stickyUID = ""
+			} else {
+				unbindSticky()
+			}
 		}
 	}
 	// ttfb 首 token 等待（仅流式有观测；非流式传 0 = 无观测，速率不扣减）。
@@ -1052,9 +1089,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 跨域回退开启且请求为裸名时，粘性号可以落在任一域（回退成功后绑定的是另一域
 			// 的账号，下一轮不该被 realm 校验立刻解绑）。
 			if acct == nil || (realm != "" && acct.Realm() != realm && !crossRealm) {
-				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑，
-				// 本次回落普通轮换。
-				unbindSticky()
+				// 粘性号暂不可用（冷却/占满/该模型被 6004 限额/保底）：
+				// 保留绑定、本次普通轮换，原号恢复后自动切回；永久失效才解绑。
+				if h.stickyBindingPreservable(stickyUID, realm, crossRealm) {
+					preserveSticky = true
+					stickyUID = ""
+				} else {
+					unbindSticky()
+				}
 				acct = nil
 			}
 		}
@@ -1118,10 +1160,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 占用并发名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
 		// 等待队列返回的 acct 已经占好名额，不再二次 Acquire。
 		if !waitedAcquired && !h.cfg.Pool.Acquire(acct.UID) {
-			// 若被抢的正是粘性号，立即解绑并回落普通轮换，避免下一轮仍撞同一个
-			// 满载粘性号再浪费一次 PickByUID 往返（语义与 fail()/PickByUID-nil 的解绑一致）。
+			// 若被抢的正是粘性号：临时满载 → 保留绑定、本轮换号；永久失效才解绑。
 			if stickyUID != "" && acct.UID == stickyUID {
-				unbindSticky()
+				if h.stickyBindingPreservable(stickyUID, realm, crossRealm) {
+					preserveSticky = true
+					stickyUID = ""
+				} else {
+					unbindSticky()
+				}
 			}
 			if !rotateBackoff(i, r.Context()) {
 				// 客户端已断连：换号重试无意义，终止轮转走末端错误透传。
@@ -1405,7 +1451,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeInterrupted
 				h.cfg.Pool.NoteSuccess(acct.UID)
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-				if sessKey != "" && h.sessionRouter() != nil {
+				if sessKey != "" && h.sessionRouter() != nil && !preserveSticky {
 					h.sessionRouter().Bind(sessKey, acct.UID)
 				}
 			default:
@@ -1416,8 +1462,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 				// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
-				// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-				if sessKey != "" && h.sessionRouter() != nil {
+				// preserveSticky=true 表示原绑定只是临时故障、本请求借号：保留原绑定，
+				// 成功也不改绑，原号在 TTL 内恢复后自动切回。
+				if sessKey != "" && h.sessionRouter() != nil && !preserveSticky {
 					h.sessionRouter().Bind(sessKey, acct.UID)
 				}
 			}
@@ -1489,7 +1536,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		if sessKey != "" && h.sessionRouter() != nil {
+		// preserveSticky=true：原绑定临时故障、本请求借号，保留原绑定不改绑。
+		if sessKey != "" && h.sessionRouter() != nil && !preserveSticky {
 			h.sessionRouter().Bind(sessKey, acct.UID)
 		}
 		return

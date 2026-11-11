@@ -182,27 +182,51 @@ func (r *Router) Resolve(key string) (string, bool) {
 // LookupForModel 只复用已有有效绑定，不通过哈希为新会话分配账号。
 // 有序账号池策略用它保留粘性，未绑定会话由 Pool 选号并在成功后 Bind。
 func (r *Router) LookupForModel(key, model string) (string, bool) {
+	uid, ok, _ := r.LookupForModelState(key, model)
+	return uid, ok
+}
+
+// LookupForModelState 同 LookupForModel，但额外返回 preserved：
+//   - ok=true：绑定可用，已续期；
+//   - ok=false, preserved=true：绑定存在但当前不可用（冷却/并发满/模型限流等），
+//     绑定**保留且不续期 TTL**，调用方应临时用别的号并跳过 Bind；
+//   - ok=false, preserved=false：无绑定或已过期。
+func (r *Router) LookupForModelState(key, model string) (uid string, ok bool, preserved bool) {
 	now := time.Now()
 	available := r.availableSet(model)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, found := r.entries[key]
-	if !found || expired(e, now, r.cfg.TTL) || !available[e.uid] {
-		return "", false
+	if !found || expired(e, now, r.cfg.TTL) {
+		return "", false, false
+	}
+	if !available[e.uid] {
+		return e.uid, false, true
 	}
 	r.entries[key] = entry{uid: e.uid, lastActive: now}
 	r.cfg.Store.SetBind(key, e.uid, r.cfg.TTL)
-	return e.uid, true
+	return e.uid, true, false
 }
 
 // ResolveForModel 返回会话 key 在该模型上应绑定的账号 uid。
-// 命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/占满/
-// 被该模型限流）走重新分配。
+// 命中且账号在该模型可用 → 滚动 lastActive 并直接返回；绑定存在但当前不可用时
+// 不再删绑重分配（故障保留，见 ResolveForModelState）。
+func (r *Router) ResolveForModel(key, model string) (string, bool) {
+	uid, ok, _ := r.ResolveForModelState(key, model)
+	return uid, ok
+}
+
+// ResolveForModelState 返回会话应使用的账号及绑定状态：
+//   - ok=true：已有绑定可用（已续期），或新会话已分配绑定；
+//   - ok=false, preserved=true：已有绑定但当前不可用（冷却/并发满/模型级限流/
+//     积分保底等）。绑定保留且**不续期 TTL**，调用方应临时走普通轮换并跳过 Bind；
+//     原号在 TTL 内恢复后下一轮会自动切回，TTL 到期则按新会话重新分配；
+//   - ok=false, preserved=false：无绑定/已过期/池空。
 //
 // 为什么必须带模型：绑定只记 uid，同一个会话可能换模型；账号被 6004 模型级限额后
 // 对其他模型仍可用（见 pool.healthyForModel 的 softRateModel 豁免）。若只按账号级
 // 可用性校验，会话会被钉在一个"对当前模型不可用"的号上反复失败。
-func (r *Router) ResolveForModel(key, model string) (string, bool) {
+func (r *Router) ResolveForModelState(key, model string) (uid string, ok bool, preserved bool) {
 	now := time.Now()
 	available := r.availableSet(model)
 
@@ -213,9 +237,10 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	if found && !expired(e, now, r.cfg.TTL) {
 		if available[e.uid] {
 			r.touch(key, e.uid, now)
-			return e.uid, true
+			return e.uid, true, false
 		}
-		// 绑定号已冷却/占满 → 失效，落入慢路径重分配。
+		// 绑定号暂不可用：保留绑定，本请求由调用方临时轮换（不续期）。
+		return e.uid, false, true
 	}
 
 	// ── Slow path: 写锁 re-check 后分配 ────────────────────
@@ -223,17 +248,21 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	defer r.mu.Unlock()
 
 	// re-check：并发同 key 可能已被其他 goroutine 分配好。
-	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, r.cfg.TTL) {
-		if available[e2.uid] {
-			r.entries[key] = entry{uid: e2.uid, lastActive: now}
-			return e2.uid, true
+	if e2, found2 := r.entries[key]; found2 {
+		if !expired(e2, now, r.cfg.TTL) {
+			if available[e2.uid] {
+				r.entries[key] = entry{uid: e2.uid, lastActive: now}
+				return e2.uid, true, false
+			}
+			// 暂不可用：保留绑定，不删不换。
+			return e2.uid, false, true
 		}
-		delete(r.entries, key) // 失效：清掉再分配
+		delete(r.entries, key) // 过期：清掉再分配
 	}
 
 	uids := r.allocSlice(model)
 	if len(uids) == 0 {
-		return "", false
+		return "", false, false
 	}
 
 	// 双段策略：优先"空闲账号"（未被任何会话绑定的可用号），其次全池。
@@ -251,7 +280,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	if len(pool2) == 0 {
 		pool2 = uids
 	}
-	uid := pool2[hashIndex(key, len(pool2))]
+	uid = pool2[hashIndex(key, len(pool2))]
 
 	prev, existed := r.entries[key]
 	r.entries[key] = entry{uid: uid, lastActive: now}
@@ -259,7 +288,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 		r.cfg.Store.DelBind(key)
 	}
 	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
-	return uid, true
+	return uid, true, false
 }
 
 // touch 滚动 lastActive 并异步镜像（只在快路径命中时写最后一次）。
@@ -271,8 +300,9 @@ func (r *Router) touch(key, uid string, now time.Time) {
 }
 
 // Bind 显式把会话 key 绑定到 uid（幂等覆盖旧值），并异步镜像到 redisstore。
-// 供"粘性跟随最终成功号"用：请求成功返回前，把会话重绑到实际成功的账号，让多轮对话下一跳稳定
-// 收敛到"对该会话持续成功的号"（对齐 antigravity 语义）。空 key 直接返回（无会话则不绑）。
+// 供"新会话成功落绑"与"粘性跟随最终成功号"用。注意：绑定号临时故障、本请求
+// 借用其他账号时（preserveSticky），调用方必须跳过 Bind，保留原绑定等原号恢复。
+// 空 key 直接返回（无会话则不绑）。
 func (r *Router) Bind(key, uid string) {
 	if key == "" || uid == "" {
 		return

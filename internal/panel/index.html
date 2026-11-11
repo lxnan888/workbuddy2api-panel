@@ -1149,7 +1149,7 @@ socks5://user:pass@host:port"></textarea></label>
               <label class="fld"><span class="lb">国际版账号顺序（UID）</span>
                 <input name="international_account_order" placeholder="uid1, uid2, uid3"></label>
             </div>
-            <div class="hint">按地区独立热生效；未列出的账号按 UID 排序追加。指针按地区和模型分别保存。账号优先级最高（已绑定的粘性会话除外）：先选最高优先级组，同组内再按模型成本分层、快过期积分、权重/顺序策略；高优先级号冷却/并发满/模型不可用时立即降级。有序策略等待冷却恢复，不提前试探；临时重试或并发占满不推进顺序耗尽的主账号。闲置与快过期积分权重仅用于加权随机。</div>
+            <div class="hint">按地区独立热生效；未列出的账号按 UID 排序追加。指针按地区和模型分别保存。账号优先级最高（已绑定的粘性会话除外）：先选最高优先级组，同组内再按模型成本分层、快过期积分、权重/顺序策略；高优先级号冷却/并发满/模型不可用时立即降级。粘性绑定号临时故障时保留原绑定、本请求临时换号且不改绑，原号在 TTL 内恢复后自动切回（故障期间不续期 TTL）。有序策略等待冷却恢复，不提前试探；临时重试或并发占满不推进顺序耗尽的主账号。闲置与快过期积分权重仅用于加权随机。</div>
             <div class="grid3">
               <label class="fld"><span class="lb">并发满等待</span>
                 <input name="concurrency_wait_timeout" placeholder="30s">
