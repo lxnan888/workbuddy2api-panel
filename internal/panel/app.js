@@ -392,6 +392,18 @@ setTimeout(() => {
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
 let accFilter = 'healthy'; // 顶部状态筛选：total / healthy / cooling / disabled / paused
+let accGroup = 'all';      // 分组筛选：all / __none__ / 组名（与状态卡叠加）
+let accSort = (() => { try { return JSON.parse(localStorage.getItem('wb2.accSort') || 'null') || { key: '', dir: 1 }; } catch (e) { return { key: '', dir: 1 }; } })();
+let accSelected = new Set();
+let editingGrpUID = '';
+const ACC_SORT_KEYS = {
+  name: s => (s.nickname || s.uid || '').toLowerCase(),
+  credits: s => Number(s.credits || 0),
+  success: s => Number(s.success_count || 0),
+  priority: s => Number(s.priority || 0),
+  group: s => (s.group || '').toLowerCase(),
+  last_success: s => new Date(s.last_success || 0).getTime(),
+};
 
 function accCoolLeft(s) {
   const bl = new Date(s.breaker_until || 0) - Date.now();
@@ -401,8 +413,8 @@ function accCoolLeft(s) {
 
 function renderAccounts(list) {
   const tb = $('accBody');
-  // 内联改名/改并发期间不让 5 秒轮询重建表格（否则输入框会被冲掉）。
-  if (editingNameUID || editingConcUID || editingPriUID) return;
+  // 内联改名/改并发/改优先级/改分组期间不让 5 秒轮询重建表格（否则输入框会被冲掉）。
+  if (editingNameUID || editingConcUID || editingPriUID || editingGrpUID) return;
   // 焦点在表格内（下拉展开/正在选择）时不重建，避免操作被打断。
   if (document.activeElement && tb && tb.contains(document.activeElement)) return;
   let rows = list || [];
@@ -418,9 +430,20 @@ function renderAccounts(list) {
       return true;
     });
   }
+  // 分组筛选与状态筛选叠加（AND）。
+  if (accGroup === '__none__') rows = rows.filter(s => !s.group);
+  else if (accGroup !== 'all') rows = rows.filter(s => s.group === accGroup);
+  // 排序：点击表头正向→逆向→再点回正向；状态缓存 localStorage，刷新恢复。
+  if (accSort.key && ACC_SORT_KEYS[accSort.key]) {
+    const fn = ACC_SORT_KEYS[accSort.key];
+    rows = rows.slice().sort((a, b) => {
+      const x = fn(a), y = fn(b);
+      return (x < y ? -1 : x > y ? 1 : 0) * accSort.dir;
+    });
+  }
   let html;
   if (!rows.length) {
-    html = '<tr><td colspan="10"><div class="empty"><div class="big">' + (list && list.length ? '该筛选下没有账号' : '账号池是空的') + '</div>' + (list && list.length ? '点击顶部状态可切换筛选' : '点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号') + '</div></td></tr>';
+    html = '<tr><td colspan="13"><div class="empty"><div class="big">' + (list && list.length ? '该筛选下没有账号' : '账号池是空的') + '</div>' + (list && list.length ? '点击顶部状态或分组可切换筛选' : '点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号') + '</div></td></tr>';
     if (tb.innerHTML !== html) tb.innerHTML = html;
     return;
   }
@@ -474,6 +497,7 @@ function renderAccounts(list) {
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
+      '<td class="check-cell"><input type="checkbox" class="acc-sel" data-uid="' + esc(s.uid) + '"' + (accSelected.has(s.uid) ? ' checked' : '') + ' title="选中以批量移动分组"></td>' +
       '<td class="who"><div class="nm" data-uid="' + esc(s.uid) + '" data-name="' + esc(s.nickname || '') + '" title="点击修改账号名（写回 auth 文件）">' + remarkName(s.uid, s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td class="proxy-cell">' + accountProxyHTML(s.uid, s.realm) + '</td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
@@ -481,6 +505,7 @@ function renderAccounts(list) {
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num pri' + ((s.priority || 0) > 0 ? ' hi' : '') + '" data-uid="' + esc(s.uid) + '" data-priority="' + (s.priority || 0) + '" title="点击修改优先级：数字越大越优先，0 = 默认；同优先级按快过期/成本/权重/顺序策略">' + (s.priority || 0) + '</td>' +
       '<td class="num conc" data-uid="' + esc(s.uid) + '" data-override="' + (s.concurrency_override || 0) + '" data-limit="' + (s.concurrency_limit || 0) + '" title="点击修改并发（当前/上限；0 = 按域默认）">' + (s.concurrency || 0) + ' / ' + (s.concurrency_limit || 0) + '</td>' +
+      '<td class="num grp' + (s.group ? '' : ' empty') + '" data-uid="' + esc(s.uid) + '" data-group="' + esc(s.group || '') + '" title="点击修改分组；分组仅用于展示/筛选，不影响选号">' + (s.group ? esc(s.group) : '未分组') + '</td>' +
       '<td class="num usage-cell" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +
         '<span class="usage-item usage-count"><b>' + req + '</b><em>次</em></span>' +
         '<span class="usage-item usage-total"><b>' + totalTok + '</b>' + totalTokUnit + '</span>' +
@@ -520,6 +545,185 @@ document.querySelectorAll('.stat[data-filter]').forEach(el => {
     updateStatActive();
   });
 });
+
+/* ── 分组筛选 / 批量移动 / 排序 ────────────────────────────────────── */
+function groupList() { return (overviewData && overviewData.groups) || []; }
+function renderGroupOptions() {
+  const gs = groupList();
+  const opts = '<option value="">未分组</option>' + gs.map(g => '<option value="' + esc(g) + '">' + esc(g) + '</option>').join('');
+  const sel = $('groupMoveSel');
+  if (sel && sel.innerHTML !== opts) sel.innerHTML = opts;
+  const dl = $('importGroupList');
+  if (dl) { const d = gs.map(g => '<option value="' + esc(g) + '"></option>').join(''); if (dl.innerHTML !== d) dl.innerHTML = d; }
+}
+function renderGroupChips() {
+  const box = $('groupChips');
+  if (!box) return;
+  const gs = groupList();
+  const html = '<button class="xs chip' + (accGroup === 'all' ? ' on' : '') + '" data-group="all">全部</button>' +
+    '<button class="xs chip' + (accGroup === '__none__' ? ' on' : '') + '" data-group="__none__">未分组</button>' +
+    gs.map(g => '<button class="xs chip' + (accGroup === g ? ' on' : '') + '" data-group="' + esc(g) + '">' + esc(g) + '</button>').join('');
+  if (box.innerHTML !== html) box.innerHTML = html;
+  renderGroupOptions();
+}
+$('groupChips') && $('groupChips').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-group]');
+  if (!b) return;
+  accGroup = b.dataset.group;
+  renderGroupChips();
+  if (overviewData) renderAccounts(overviewData.accounts || []);
+  renderGroupBatch();
+});
+
+function selectedUIDs() {
+  // 只保留仍在号池里的选择，避免移除账号后残留。
+  const live = new Set((overviewData.accounts || []).map(s => s.uid));
+  for (const u of accSelected) if (!live.has(u)) accSelected.delete(u);
+  return [...accSelected];
+}
+function renderGroupBatch() {
+  const box = $('groupBatch');
+  if (!box) return;
+  const n = selectedUIDs().length;
+  box.hidden = n === 0;
+  setText('groupSelCount', n);
+  const all = $('accSelAll');
+  if (all) {
+    const shown = (overviewData.accounts || []).filter(s => visibleAccount(s)).map(s => s.uid);
+    all.checked = shown.length > 0 && shown.every(u => accSelected.has(u));
+    all.indeterminate = !all.checked && shown.some(u => accSelected.has(u));
+  }
+}
+function visibleAccount(s) {
+  if (accGroup === '__none__' && s.group) return false;
+  if (accGroup !== 'all' && accGroup !== '__none__' && s.group !== accGroup) return false;
+  const cool = accCoolLeft(s);
+  switch (accFilter) {
+    case 'healthy': return !s.disabled && !s.paused && cool <= 0;
+    case 'cooling': return !s.disabled && cool > 0;
+    case 'disabled': return !!s.disabled || !!s.paused;
+    case 'paused': return !!s.paused && !s.disabled;
+  }
+  return true;
+}
+$('accBody') && $('accBody').addEventListener('change', ev => {
+  const cb = ev.target.closest('input.acc-sel');
+  if (!cb) return;
+  if (cb.checked) accSelected.add(cb.dataset.uid); else accSelected.delete(cb.dataset.uid);
+  renderGroupBatch();
+});
+$('accSelAll') && $('accSelAll').addEventListener('change', ev => {
+  const on = ev.target.checked;
+  (overviewData.accounts || []).filter(visibleAccount).forEach(s => {
+    if (on) accSelected.add(s.uid); else accSelected.delete(s.uid);
+  });
+  if (overviewData) renderAccounts(overviewData.accounts || []);
+  renderGroupBatch();
+});
+async function moveSelected(group) {
+  const uids = selectedUIDs();
+  if (!uids.length) return;
+  try {
+    const r = await api('accounts/group', { method: 'POST', body: JSON.stringify({ uids, group }) });
+    toast('已将 ' + (r.updated || 0) + ' 个账号移到「' + (group || '未分组') + '」', 'ok');
+    accSelected.clear();
+    await loadOverview(true);
+  } catch (e) { toast(e.message, 'err'); }
+}
+$('btnGroupMove').onclick = () => moveSelected($('groupMoveSel').value);
+$('btnGroupUnset').onclick = () => moveSelected('');
+$('btnGroupClear').onclick = () => { accSelected.clear(); renderAccounts(overviewData.accounts || []); renderGroupBatch(); };
+$('btnGroupNew').onclick = async () => {
+  const name = (prompt('新建分组名（选中账号将移入）') || '').trim();
+  if (!name) return;
+  await moveSelected(name);
+};
+$('btnGroupRename').onclick = async () => {
+  const from = accGroup === 'all' || accGroup === '__none__' ? (prompt('要重命名的分组名') || '').trim() : accGroup;
+  if (!from) return;
+  const to = (prompt('把分组「' + from + '」重命名为') || '').trim();
+  if (!to || to === from) return;
+  try {
+    const r = await api('groups/rename', { method: 'POST', body: JSON.stringify({ from, to }) });
+    if (accGroup === from) accGroup = to;
+    toast('已重命名，更新 ' + (r.updated || 0) + ' 个账号', 'ok');
+    await loadOverview(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+$('btnGroupDelete').onclick = async () => {
+  const name = accGroup === 'all' || accGroup === '__none__' ? (prompt('要删除并移除全部账号的分组名') || '').trim() : accGroup;
+  if (!name) return;
+  const n = (overviewData.accounts || []).filter(s => s.group === name).length;
+  if (!confirm('删除分组「' + name + '」会直接移除该组 ' + n + ' 个账号（含凭证文件），不可恢复。确认？')) return;
+  try {
+    const r = await api('groups/delete', { method: 'POST', body: JSON.stringify({ group: name }) });
+    accGroup = 'all';
+    accSelected.clear();
+    toast('已删除分组并移除 ' + (r.removed || 0) + ' 个账号', 'ok');
+    await loadOverview(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+/* 行内改分组：点击单元格弹出下拉，可选择已有组 / 新建 / 移出。 */
+function startAccountGroup(uid, group, el, groups) {
+  if (!el || editingGrpUID) return;
+  editingGrpUID = uid;
+  const old = el.innerHTML;
+  const sel = document.createElement('select');
+  sel.className = 'grp-select';
+  sel.style.width = '100%';
+  sel.innerHTML = '<option value="">未分组</option>' +
+    (groups || []).map(g => '<option value="' + esc(g) + '"' + (g === group ? ' selected' : '') + '>' + esc(g) + '</option>').join('') +
+    '<option value="__new__">＋新建分组…</option>';
+  el.innerHTML = '';
+  el.appendChild(sel);
+  let cancelled = false;
+  const finish = async () => {
+    if (cancelled) return;
+    let val = sel.value;
+    if (val === '__new__') {
+      val = (prompt('新建分组名') || '').trim();
+      if (!val) { cancelled = true; editingGrpUID = ''; el.innerHTML = old; return; }
+    }
+    editingGrpUID = '';
+    try {
+      await api('accounts/' + encodeURIComponent(uid) + '/group', { method: 'PUT', body: JSON.stringify({ group: val }) });
+      toast('分组已更新：' + (val || '未分组'), 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    await loadOverview(true);
+  };
+  sel.addEventListener('change', () => sel.blur());
+  sel.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); cancelled = true; editingGrpUID = ''; el.innerHTML = old; }
+  });
+  sel.addEventListener('blur', finish);
+  sel.focus();
+}
+
+/* 表头排序：点一下正向，再点一下逆向，状态缓存 localStorage。 */
+function updateSortIndicators() {
+  document.querySelectorAll('.acc th[data-sort]').forEach(th => {
+    const ind = th.querySelector('.sort-ind');
+    if (!ind) return;
+    ind.textContent = th.dataset.sort === accSort.key ? (accSort.dir > 0 ? ' ▲' : ' ▼') : '';
+  });
+}
+document.querySelectorAll('.acc th[data-sort]').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.sort;
+    if (accSort.key === key) accSort.dir = -accSort.dir;
+    else accSort = { key, dir: 1 };
+    localStorage.setItem('wb2.accSort', JSON.stringify(accSort));
+    updateSortIndicators();
+    if (overviewData) renderAccounts(overviewData.accounts || []);
+  });
+});
+$('btnSortReset').onclick = () => {
+  accSort = { key: '', dir: 1 };
+  localStorage.setItem('wb2.accSort', JSON.stringify(accSort));
+  updateSortIndicators();
+  if (overviewData) renderAccounts(overviewData.accounts || []);
+};
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
 // 后端 model_locks 已按「整池不可用 → 没号可用 → 部分限流」排好序，这里只做展示。
@@ -583,6 +787,9 @@ async function loadOverview(quiet) {
     setText('subMeta', '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分');
     renderAccounts(d.accounts || []);
     updateStatActive();
+    updateSortIndicators();
+    renderGroupChips();
+    renderGroupBatch();
     renderModelLocks(d.model_locks);
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的按日批次，不额外发请求）。
     // 2 分钟内的实时明细最新且更全，保留；过期后由 state 快照接管，避免点过一次
@@ -742,6 +949,7 @@ function renderProxies() {
   $('pxHealthTimeout').value = h.timeout_seconds || 10;
   $('pxHealthFail').value = h.failure_threshold || 3;
   $('pxHealthOK').value = h.success_threshold || 2;
+  if ($('pxRandomBindAvoid')) $('pxRandomBindAvoid').value = d.random_bind_avoid === 'strict' ? 'strict' : 'fallback';
 }
 
 function openProxyEdit(id) {
@@ -843,6 +1051,16 @@ $('btnPxHealthSave').onclick = async () => {
       }),
     });
     toast('健康检查设置已保存', 'ok');
+    loadProxies(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+$('btnPxRandomBindAvoid').onclick = async () => {
+  try {
+    await api('proxies/random_bind_avoid', {
+      method: 'PUT',
+      body: JSON.stringify({ mode: $('pxRandomBindAvoid').value }),
+    });
+    toast('随机出口避让设置已保存（实时生效）', 'ok');
     loadProxies(true);
   } catch (e) { toast(e.message, 'err'); }
 };
@@ -1010,6 +1228,11 @@ $('accBody').addEventListener('click', ev => {
   const pc = ev.target.closest('.pri[data-uid]');
   if (pc && !ev.target.closest('input')) {
     startAccountPriority(pc.dataset.uid, Number(pc.dataset.priority || 0), pc);
+    return;
+  }
+  const gc = ev.target.closest('.grp[data-uid]');
+  if (gc && !ev.target.closest('input') && !ev.target.closest('select')) {
+    startAccountGroup(gc.dataset.uid, gc.dataset.group || '', gc, groupList());
   }
 });
 
@@ -1849,43 +2072,83 @@ $('btnStartLogin').onclick = startAddLogin;
 $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
+/* ── 批量导入：一次提交全部文件 → 后端异步任务 → 轮询进度 8/99 ────── */
+let importPollTimer = null;
+function importProgressText(s) {
+  return '导入进度 ' + (s.finished || 0) + '/' + (s.total || 0) +
+    '（已导入 ' + (s.imported || 0) + ' · 跳过 ' + (s.skipped || 0) + '）' +
+    (s.current ? ' · ' + s.current : '');
+}
+function renderImportProgress(s) {
+  const running = !!(s && s.running);
+  const done = !!(s && s.done && s.job_id);
+  const box = $('importBox'), dlg = $('importProgress'), top = $('importTop');
+  if (!box || !dlg) return;
+  box.hidden = !running;
+  if (top) { top.hidden = !running; if (running) setText('importTop', '导入 ' + (s.finished || 0) + '/' + (s.total || 0)); }
+  if (running) {
+    const pct = s.total > 0 ? Math.min(100, Math.round((s.finished || 0) / s.total * 100)) : 0;
+    setText('importBoxCount', (s.finished || 0) + '/' + (s.total || 0));
+    setText('importBoxNote', '成功 ' + (s.imported || 0) + ' · 跳过 ' + (s.skipped || 0) + (s.current ? ' · 当前 ' + s.current : ''));
+    $('importBoxBar').style.width = pct + '%';
+    dlg.hidden = false;
+    dlg.textContent = importProgressText(s);
+  } else {
+    $('importBoxBar').style.width = '100%';
+    dlg.hidden = false;
+    dlg.textContent = done ? '导入完成：成功 ' + (s.imported || 0) + ' 个，跳过 ' + (s.skipped || 0) + ' 个' : '';
+    // 已完成：把汇总写进弹窗（仅当本次会话提交过任务，避免刷新后显示旧结果）。
+    if (done && localStorage.getItem('wb2.importJob') === s.job_id) {
+      $('importDone').hidden = false;
+      $('importDone').textContent = '导入完成：成功 ' + (s.imported || 0) + ' 个，跳过 ' + (s.skipped || 0) + ' 个';
+      if (s.errors && s.errors.length) {
+        $('importErr').hidden = false;
+        $('importErr').textContent = '部分账号跳过：' + s.errors.slice(0, 3).join('；') + (s.errors.length > 3 ? '；等 ' + s.errors.length + ' 条' : '');
+      }
+    }
+  }
+  $('importFile').disabled = running;
+  $('btnCloseAdd').disabled = false; // 允许关闭弹窗去别处看进度
+}
+async function pollImportStatus() {
+  try {
+    const s = await api('import/status');
+    renderImportProgress(s);
+    if (s.running) {
+      if (!importPollTimer) importPollTimer = setInterval(pollImportStatus, 700);
+    } else {
+      if (importPollTimer) { clearInterval(importPollTimer); importPollTimer = null; }
+      // 任务刚完成：刷新账号池一次；若弹窗仍开着且是本次任务，保留汇总。
+      loadOverview(true);
+    }
+  } catch (e) { /* 轮询失败不打扰，下一轮继续 */ }
+}
+// 页面加载/刷新后恢复进度：任务状态在后端常驻，直到完成都显示。
+setTimeout(pollImportStatus, 0);
+
 $('importFile').onchange = async () => {
   const files = Array.from($('importFile').files || []);
   if (!files.length) return;
-  $('importDone').hidden = true; $('importErr').hidden = true;
+  $('importDone').hidden = true; $('importErr').hidden = true; $('importProgress').hidden = true;
+  const fd = new FormData();
+  files.forEach(f => fd.append('file', f));
+  fd.append('group', ($('importGroup') && $('importGroup').value || '').trim());
   const h = {};
   const k = localStorage.getItem(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
-  let imported = 0, skipped = 0, failed = 0;
-  const errs = [];
-  for (const file of files) {
-    const fd = new FormData();
-    fd.append('file', file);
-    try {
-      const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-      imported += d.imported || 0;
-      skipped += d.skipped || 0;
-      if (d.errors && d.errors.length) errs.push(...d.errors.map(x => file.name + '：' + x));
-    } catch (e) {
-      failed++;
-      errs.push(file.name + '：' + e.message);
-    }
-  }
-  if (imported || skipped) {
-    $('importDone').hidden = false;
-    $('importDone').textContent = '导入完成：成功 ' + imported + ' 个' +
-      (skipped ? '，跳过 ' + skipped + ' 个' : '') +
-      (files.length > 1 ? '，共 ' + files.length + ' 个文件' : '');
-  }
-  if (failed || errs.length) {
+  try {
+    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    localStorage.setItem('wb2.importJob', d.job_id || '');
+    $('importProgress').hidden = false;
+    $('importProgress').textContent = '导入任务已启动，共 ' + d.total + ' 个账号…';
+    if (!importPollTimer) importPollTimer = setInterval(pollImportStatus, 700);
+    pollImportStatus();
+  } catch (e) {
     $('importErr').hidden = false;
-    $('importErr').textContent = (failed ? failed + ' 个文件导入失败：' : '部分账号跳过：') +
-      errs.slice(0, 3).join('；') + (errs.length > 3 ? '；等 ' + errs.length + ' 条' : '');
+    $('importErr').textContent = '导入失败：' + e.message;
   }
-  if (errs.length) console.warn('import errors:', errs);
-  loadOverview(true);
   $('importFile').value = '';
 };
 

@@ -17,6 +17,7 @@ func (p *Pool) SetCredits(uid string, credits, total int64) {
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = credits
 		e.creditsTotal = total
+		e.creditsObserved = true
 		p.dirty.Store(true)
 	}
 }
@@ -132,6 +133,7 @@ func (p *Pool) SetCreditsSnapshot(uid string, s CreditsSnapshot) {
 	}
 	e.credits = credits
 	e.creditsTotal = s.Total
+	e.creditsObserved = true
 	e.creditsExpiring = expiring
 	e.creditsEarliestExpiry = earliestAt
 	e.creditsEarliestRemaining = earliestRemaining

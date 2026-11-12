@@ -127,6 +127,11 @@ type disk struct {
 	// cn/global 的上游域名与网络环境不同，运维通常要两个出口。
 	Realms   map[string]Binding `json:"realms,omitempty"`
 	Settings Settings           `json:"health"`
+	// RandomBindAvoid 未绑定账号选「随机」时如何处理「已被账号级 fixed 绑定」的代理：
+	//   "fallback"（默认/零值）：优先只用未绑定的健康代理，没有则退回全池健康代理随机；
+	//   "strict"：绝不占用已绑定代理，没有空闲健康代理时走总代理/直连兜底。
+	// 写入 proxy-pool.json，与 config.json 无关。
+	RandomBindAvoid string `json:"random_bind_avoid,omitempty"`
 	// Global 容器级总代理；不写 config.json，随代理池文件一起持久化。
 	Global GlobalConfig `json:"global,omitempty"`
 }
@@ -160,11 +165,12 @@ type View struct {
 }
 
 type Snapshot struct {
-	Proxies  []View             `json:"proxies"`
-	Bindings map[string]Binding `json:"bindings"`
-	Realms   map[string]Binding `json:"realms"`
-	Health   Settings           `json:"health"`
-	Global   GlobalView         `json:"global"`
+	Proxies         []View             `json:"proxies"`
+	Bindings        map[string]Binding `json:"bindings"`
+	Realms          map[string]Binding `json:"realms"`
+	Health          Settings           `json:"health"`
+	RandomBindAvoid string             `json:"random_bind_avoid"`
+	Global          GlobalView         `json:"global"`
 }
 
 type Input struct {
@@ -481,7 +487,11 @@ func (m *Manager) Snapshot() Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	d := m.copyLocked()
-	s := Snapshot{Proxies: []View{}, Bindings: d.Bindings, Realms: d.Realms, Health: d.Settings}
+	mode := d.RandomBindAvoid
+	if mode != "strict" {
+		mode = "fallback" // 零值/非法值 = 默认
+	}
+	s := Snapshot{Proxies: []View{}, Bindings: d.Bindings, Realms: d.Realms, Health: d.Settings, RandomBindAvoid: mode}
 	counts := map[string]int{}
 	for _, b := range d.Bindings {
 		if b.Mode == "fixed" {
@@ -770,6 +780,37 @@ func (m *Manager) RequestCheck(id string) error {
 	return nil
 }
 
+// SetRandomBindAvoid 设置「随机出口避开账号绑定代理」模式：
+// "fallback"（默认）= 优先空闲代理、没有则回退全池；"strict" = 绝不占用绑定代理。
+// 非法/空值按 fallback 处理。变更立即生效并持久化到 proxy-pool.json。
+func (m *Manager) SetRandomBindAvoid(mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = "fallback"
+	}
+	if mode != "fallback" && mode != "strict" {
+		return errors.New("random_bind_avoid must be fallback or strict")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d := m.copyLocked()
+	if d.RandomBindAvoid == mode {
+		return nil
+	}
+	d.RandomBindAvoid = mode
+	return m.commitLocked(d)
+}
+
+// RandomBindAvoid 返回当前模式（归一化后的 fallback/strict）。
+func (m *Manager) RandomBindAvoid() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.data.RandomBindAvoid == "strict" {
+		return "strict"
+	}
+	return "fallback"
+}
+
 func (m *Manager) Configure(s Settings) error {
 	if err := s.validate(); err != nil {
 		return err
@@ -857,25 +898,46 @@ func (m *Manager) selectLocked(uid, realm string) (selection, error) {
 		return selection{}, &Error{ProxyID: b.ProxyID, Reason: "fixed proxy not found"}
 	}
 
-	// random / 未绑定：优先池代理，其次总代理，最后直连。
-	anyEnabled := false
-	var selected node
-	count := 0
-	for _, n := range m.data.Nodes {
-		if n.Enabled {
-			anyEnabled = true
+	// random / 未绑定：优先从「健康 + 启用 + 未被账号级 fixed 绑定」的代理里等概率
+	// 随机（蓄水池抽样）；这样 6 个号各绑专属出口时，第 7 个号不会大概率撞别人出口。
+	// 一条空闲代理都没有时：
+	//   - fallback（默认）：退回全池健康代理随机，保证有网可用；
+	//   - strict：绝不占用已绑定代理，直接走下面的总代理/直连兜底。
+	// 「已绑定」只统计账号级 Bindings 的 fixed；realm 默认 fixed 是给未绑定账号用的，
+	// 不算专属，仍可随机命中。Bind/Unbind 改的是同一份 data，下一次请求立即生效。
+	boundIDs := map[string]bool{}
+	for _, binding := range m.data.Bindings {
+		if binding.Mode == "fixed" && binding.ProxyID != "" {
+			boundIDs[binding.ProxyID] = true
 		}
-		if n.Enabled && m.health[n.ID].status == "healthy" && !m.exitBlockedLocked(n.ID, now) {
+	}
+	healthyOf := func(avoidBound bool) (node, int) {
+		var selected node
+		count := 0
+		for _, n := range m.data.Nodes {
+			if !n.Enabled || m.health[n.ID].status != "healthy" || m.exitBlockedLocked(n.ID, now) {
+				continue
+			}
+			if avoidBound && boundIDs[n.ID] {
+				continue
+			}
 			count++
 			if rand.IntN(count) == 0 {
 				selected = n
 			}
 		}
+		return selected, count
 	}
+	selected, count := healthyOf(true)
 	if count > 0 {
 		return selection{node: selected, proxied: true}, nil
 	}
-	_ = anyEnabled
+	if m.data.RandomBindAvoid != "strict" {
+		selected, count = healthyOf(false)
+		if count > 0 {
+			return selection{node: selected, proxied: true}, nil
+		}
+	}
 	if m.globalAvailableLocked(now) {
 		return selection{global: true}, nil
 	}

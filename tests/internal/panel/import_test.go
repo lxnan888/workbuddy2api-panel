@@ -116,7 +116,8 @@ func TestParseImportFileShapes(t *testing.T) {
 	})
 }
 
-// importRaw 走真实的 multipart 导入接口。
+// importRaw 走真实的 multipart 导入接口：提交 202 后轮询状态到完成，
+// 返回 (202, 最终汇总 JSON)，保持既有断言的 {imported,skipped} 口径。
 func (e *upgEnv) importRaw(name string, raw []byte) (int, string) {
 	e.t.Helper()
 	var buf bytes.Buffer
@@ -136,7 +137,10 @@ func (e *upgEnv) importRaw(name string, raw []byte) (int, string) {
 	req.Header.Set("Authorization", "Bearer test-key")
 	rr := httptest.NewRecorder()
 	e.panel.ServeHTTP(rr, req)
-	return rr.Code, rr.Body.String()
+	if rr.Code != 202 {
+		return rr.Code, rr.Body.String()
+	}
+	return 200, waitImportDone(e.t, e.panel) // 旧断言按同步 200 写，这里兼容映射
 }
 
 // TestImportNestedSingleObject 单对象嵌套导入：落盘为 auths/ 嵌套形、入池、realm 正确。

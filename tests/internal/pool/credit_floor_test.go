@@ -135,7 +135,9 @@ func TestCreditFloorZeroDisables(t *testing.T) {
 	// 不调用 SetCreditFloor：零值即默认关闭。
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.Add(&auth.Auth{UID: "poor"})
-	p.SetCredits("poor", 1, 0)
+	// 给足余额，避免 NoteModelCost 实扣后归零触发「零积分硬保护」（那是独立
+	// 判据，与本用例验证的 floor=0 关闭无关）。
+	p.SetCredits("poor", 10, 0)
 	p.NoteModelCost("poor", "hy4-preview", 2.9, 1000)
 
 	a := p.PickExcludingForRealm(nil, "hy4-preview", "")

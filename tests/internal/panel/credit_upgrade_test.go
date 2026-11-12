@@ -290,7 +290,45 @@ func (e *upgEnv) importCockpit(accounts []map[string]any) (int, string) {
 	req.Header.Set("Authorization", "Bearer test-key")
 	rr := httptest.NewRecorder()
 	e.panel.ServeHTTP(rr, req)
-	return rr.Code, rr.Body.String()
+	if rr.Code != 202 {
+		return rr.Code, rr.Body.String()
+	}
+	return 200, waitImportDone(e.t, e.panel) // 旧断言按同步 200 写，这里兼容映射
+}
+
+// waitImportDone 轮询 /panel/api/import/status 直到 running=false，返回最终汇总 JSON。
+// 导入已改异步任务（202 + 进度轮询），测试辅助统一在这里等到完成，保持旧断言口径。
+func waitImportDone(t *testing.T, p *Panel) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		req := httptest.NewRequest("GET", "/panel/api/import/status", nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+		var s struct {
+			Done     bool     `json:"done"`
+			Imported int      `json:"imported"`
+			Skipped  int      `json:"skipped"`
+			Total    int      `json:"total"`
+			Finished int      `json:"finished"`
+			Errors   []string `json:"errors"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &s); err != nil {
+			t.Fatalf("import status parse: %v %s", err, rr.Body)
+		}
+		if s.Done {
+			raw, _ := json.Marshal(map[string]any{
+				"total": s.Total, "imported": s.Imported, "skipped": s.Skipped,
+				"finished": s.Finished, "errors": s.Errors,
+			})
+			return string(raw)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("import job timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // ---------------------------------------------------------------------------

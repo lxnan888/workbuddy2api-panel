@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -26,6 +27,7 @@ type cockpitAccount struct {
 	TokenType      string `json:"token_type"`
 	ExpiresAt      int64  `json:"expires_at"`
 	Domain         string `json:"domain"`
+	Group          string `json:"group"`
 	DosageNotify   string `json:"dosage_notify_code"`
 	PaymentType    string `json:"payment_type"`
 	Status         string `json:"status"`
@@ -40,64 +42,194 @@ type cockpitAccount struct {
 type importEntry struct {
 	auth  *auth.Auth
 	realm string // cn / global
+	group string // 分组标签（弹窗默认组可被 JSON 的 group 字段覆盖）
+	file  string // 来源文件名（错误定位）
 }
 
-// importCockpit 接收账号 JSON 文件并批量导入账号到池中。
+// importJob 一批导入任务的状态（进程内单例，前端轮询读快照）。
+type importJob struct {
+	mu       sync.Mutex
+	ID       string   `json:"job_id"`
+	Running  bool     `json:"running"`
+	Done     bool     `json:"done"`
+	Total    int      `json:"total"`
+	Finished int      `json:"finished"` // 已处理条目（含跳过），进度分母口径
+	Imported int      `json:"imported"`
+	Skipped  int      `json:"skipped"`
+	Current  string   `json:"current,omitempty"` // 当前处理的文件 / uid
+	Errors   []string `json:"errors,omitempty"`
+	Started  int64    `json:"started_at"`
+	Ended    int64    `json:"ended_at,omitempty"`
+}
+
+// importSnapshot 返回任务状态的一致快照。
+func (j *importJob) snapshot() map[string]any {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return map[string]any{
+		"job_id":     j.ID,
+		"running":    j.Running,
+		"done":       j.Done,
+		"total":      j.Total,
+		"finished":   j.Finished,
+		"imported":   j.Imported,
+		"skipped":    j.Skipped,
+		"current":    j.Current,
+		"errors":     append([]string(nil), j.Errors...),
+		"started_at": j.Started,
+		"ended_at":   j.Ended,
+	}
+}
+
+// importState 面板级导入任务状态：全局只允许一个进行中的任务。
+type importState struct {
+	mu      sync.Mutex
+	current *importJob
+}
+
+var panelImport = importState{}
+
+// importCockpit 接收多个账号 JSON 文件，启动后台导入任务并立即返回 202。
 //
 //	POST /panel/api/import/cockpit
 //	Content-Type: multipart/form-data
-//	Body: file=<json>
+//	Body: file=<json>（可重复多个）、group=<目标分组>
 //
-// 自动识别三种形态：
-//  1. 插件 OAuth 单对象 {"auth": {...}, "account": {...}}（也兼容扁平 auth 对象）
-//  2. 上述对象的数组
-//  3. cockpit tools 导出的账号数组（snake_case access_token/refresh_token）
-//
-// 返回 {ok, total, imported, skipped, errors}。
+// 返回 {ok, job_id, total}；进度经 GET /panel/api/import/status 轮询。
+// 未完成前再次提交返回 409（全局单任务）。按 UID 去重：批内重复 + 池里已存在
+// 都跳过，不覆盖凭证、不解冻、不重跑签到/激活/查余额。
 func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
+	if err := r.ParseMultipartForm(64 << 20); err != nil {
 		writeErr(w, http.StatusBadRequest, "parse form: "+err.Error())
 		return
 	}
-	file, _, err := r.FormFile("file")
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "missing file field: "+err.Error())
-		return
-	}
-	defer file.Close()
+	defaultGroup := strings.TrimSpace(r.FormValue("group"))
 
-	raw, err := io.ReadAll(file)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "read file: "+err.Error())
-		return
-	}
-
-	entries, total, parseErrs, err := parseImportFile(raw)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	imported := 0
-	skipped := len(parseErrs)
-	errs := append([]string(nil), parseErrs...)
-	for _, e := range entries {
-		if err := p.importOne(e); err != nil {
-			skipped++
-			errs = append(errs, fmt.Sprintf("uid=%s: %v", e.auth.UID, err))
+	// 先把全部文件读进内存（文件内容小），再一次性建任务，避免「建了任务才发现解析失败」。
+	var entries []importEntry
+	var errs []string
+	total := 0
+	for _, fh := range r.MultipartForm.File["file"] {
+		f, err := fh.Open()
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", fh.Filename, err))
 			continue
 		}
-		imported++
+		raw, readErr := io.ReadAll(f)
+		_ = f.Close()
+		if readErr != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", fh.Filename, readErr))
+			continue
+		}
+		fileEntries, fileTotal, parseErrs, perr := parseImportFile(raw)
+		if perr != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", fh.Filename, perr))
+			continue
+		}
+		total += fileTotal
+		for _, pe := range parseErrs {
+			errs = append(errs, fh.Filename+"："+pe)
+		}
+		for _, e := range fileEntries {
+			e.file = fh.Filename
+			if e.group == "" {
+				e.group = defaultGroup
+			}
+			entries = append(entries, e)
+		}
+	}
+	if total == 0 {
+		writeErr(w, http.StatusBadRequest, "no valid account entries in files")
+		return
 	}
 
-	log.Printf("panel: import finished total=%d imported=%d skipped=%d", total, imported, skipped)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"total":    total,
-		"imported": imported,
-		"skipped":  skipped,
-		"errors":   errs,
+	// 单任务锁：CAS 建任务，未完成前拒绝新任务。
+	job := &importJob{
+		ID:      fmt.Sprintf("imp-%d", time.Now().UnixNano()),
+		Running: true,
+		Total:   total,
+		Errors:  append([]string(nil), errs...),
+		Started: time.Now().Unix(),
+	}
+	panelImport.mu.Lock()
+	if panelImport.current != nil && panelImport.current.Running {
+		panelImport.mu.Unlock()
+		writeErr(w, http.StatusConflict, "已有导入任务进行中，请等待完成后再导入")
+		return
+	}
+	panelImport.current = job
+	panelImport.mu.Unlock()
+
+	go p.runImportJob(job, entries)
+	log.Printf("panel: import job %s started total=%d entries=%d group=%q", job.ID, total, len(entries), defaultGroup)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"ok":     true,
+		"job_id": job.ID,
+		"total":  total,
 	})
+}
+
+// importStatus 返回当前（或最近一次）导入任务的进度快照。
+// 无任务时返回 {ok:true, running:false, job_id:""}，前端据此清空进度条。
+func (p *Panel) importStatus(w http.ResponseWriter, r *http.Request) {
+	panelImport.mu.Lock()
+	job := panelImport.current
+	panelImport.mu.Unlock()
+	if job == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "running": false, "job_id": ""})
+		return
+	}
+	snap := job.snapshot()
+	snap["ok"] = true
+	writeJSON(w, http.StatusOK, snap)
+}
+
+// runImportJob 串行处理全部条目：每处理一条推进度（含跳过），并写回分组。
+func (p *Panel) runImportJob(job *importJob, entries []importEntry) {
+	defer func() {
+		job.mu.Lock()
+		job.Running = false
+		job.Done = true
+		job.Ended = time.Now().Unix()
+		job.Current = ""
+		job.mu.Unlock()
+	}()
+
+	seen := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		uid := e.auth.UID
+		job.mu.Lock()
+		job.Current = e.file + " / " + uid
+		job.mu.Unlock()
+
+		// 按 UID 去重：批内重复 / 池里已存在都跳过。
+		if seen[uid] || p.cfg.Pool.AuthByUID(uid) != nil {
+			job.mu.Lock()
+			job.Finished++
+			job.Skipped++
+			job.Errors = append(job.Errors, fmt.Sprintf("uid=%s：重复（已存在或本批重复），跳过", uid))
+			job.mu.Unlock()
+			continue
+		}
+		seen[uid] = true
+
+		if err := p.importOne(e); err != nil {
+			job.mu.Lock()
+			job.Finished++
+			job.Skipped++
+			job.Errors = append(job.Errors, fmt.Sprintf("uid=%s：%v", uid, err))
+			job.mu.Unlock()
+			continue
+		}
+		if e.group != "" {
+			p.cfg.Pool.SetAccountGroup(uid, e.group)
+		}
+		job.mu.Lock()
+		job.Finished++
+		job.Imported++
+		job.mu.Unlock()
+	}
+	log.Printf("panel: import job %s finished total=%d imported=%d skipped=%d", job.ID, job.Total, job.Imported, job.Skipped)
 }
 
 // parseImportFile 自动识别单对象 / 对象数组 / cockpit 数组。
@@ -180,7 +312,15 @@ func parseOAuthAuth(raw []byte) (importEntry, error) {
 	if realm != "cn" && realm != "global" {
 		return importEntry{}, fmt.Errorf("invalid realm %q (uid=%s)", realm, uid)
 	}
-	return importEntry{auth: a, realm: realm}, nil
+	e := importEntry{auth: a, realm: realm}
+	// 顶层 group 字段（弹窗默认组可被它覆盖）。
+	var extra struct {
+		Group string `json:"group"`
+	}
+	if json.Unmarshal(raw, &extra) == nil {
+		e.group = strings.TrimSpace(extra.Group)
+	}
+	return e, nil
 }
 
 // parseCockpitAccount 解析 cockpit tools 导出形单条账号。
@@ -223,6 +363,7 @@ func parseCockpitAccount(raw []byte) (importEntry, error) {
 			Nickname:     nickname,
 		},
 		realm: realm,
+		group: strings.TrimSpace(acc.Group),
 	}, nil
 }
 

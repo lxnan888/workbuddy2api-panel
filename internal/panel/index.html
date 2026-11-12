@@ -232,6 +232,12 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 /* 优先级列：0 保持普通字色；非零用强调色提示「这个号被手工提权」。 */
 .acc .pri { cursor: pointer; }
 .acc .pri.hi { color: var(--accent); font-weight: 650; }
+/* 分组列与可排序表头 */
+.acc .grp { cursor: pointer; color: var(--ink-2); }
+.acc .grp.empty { color: var(--ink-3); }
+.acc th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+.acc th[data-sort]:hover { color: var(--accent); }
+.acc th .sort-ind { color: var(--accent); font-size: 10px; }
 /* 档位标签列：允许换行在标签之间（不拆字），并给足最小宽度 */
 .acc .efs { min-width: 150px; }
 .acc .efs .tag { margin: 1px 0; }
@@ -660,6 +666,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <h2 id="ttl">账号池</h2>
       <span class="sep">/</span>
       <span class="meta" id="subMeta">-</span>
+      <span class="tag warn" id="importTop" hidden style="margin-left:8px"></span>
       <div class="grow"></div>
       <button class="icon ghost" id="btnTheme" title="切换明暗（跟随系统 → 浅色 → 深色）" aria-label="切换主题">
         <svg id="icoTheme" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/></svg>
@@ -710,11 +717,39 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="pad"><div id="compList"></div></div>
       </div>
 
+      <!-- 批量导入进度：任务在后端异步跑，刷新页面后依然显示直到完成 -->
+      <div class="box" id="importBox" hidden>
+        <header><h3>批量导入进度 <span class="hint" id="importBoxNote"></span></h3>
+          <span class="grow"></span><span class="note" id="importBoxCount"></span></header>
+        <div class="pad"><div class="bar" style="height:6px;background:var(--surface-2);border-radius:4px;overflow:hidden"><i id="importBoxBar" style="display:block;height:100%;width:0;background:var(--accent);transition:width .3s"></i></div></div>
+      </div>
+
+      <div class="box" id="groupBox">
+        <header>
+          <h3>分组 <span class="hint">仅用于展示/筛选/批量运维，不影响选号</span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnGroupRename">重命名分组</button>
+          <button class="xs danger" id="btnGroupDelete">删除分组（删号）</button>
+        </header>
+        <div class="pad">
+          <div class="chips" id="groupChips"></div>
+          <div id="groupBatch" class="state" hidden style="margin-top:8px">
+            已选 <b id="groupSelCount">0</b> 个账号：
+            <select id="groupMoveSel" style="margin:0 4px"></select>
+            <button class="xs primary" id="btnGroupMove">移动</button>
+            <button class="xs" id="btnGroupNew">＋新建分组并移动</button>
+            <button class="xs" id="btnGroupUnset">移出分组</button>
+            <button class="xs ghost" id="btnGroupClear">取消选择</button>
+          </div>
+        </div>
+      </div>
+
       <div class="box">
         <header>
           <h3>账号池</h3>
           <span class="grow"></span>
           <span class="note" id="accNote"></span>
+          <button class="xs" id="btnSortReset">默认排序</button>
           <button class="xs" id="btnCheckinAll">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
           <button class="xs" id="btnActivityAll">活跃上报</button>
@@ -724,8 +759,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <table class="acc">
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
-            <th>账号</th><th>出口</th><th>状态</th><th>积分</th>
-            <th>成功 / 失败</th><th>优先级</th><th>并发</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
+            <th><input type="checkbox" id="accSelAll" title="全选当前筛选结果" style="vertical-align:middle"></th>
+            <th data-sort="name">账号 <span class="sort-ind"></span></th><th>出口</th><th>状态</th>
+            <th data-sort="credits">积分 <span class="sort-ind"></span></th>
+            <th data-sort="success">成功 / 失败 <span class="sort-ind"></span></th>
+            <th data-sort="priority">优先级 <span class="sort-ind"></span></th><th>并发</th>
+            <th data-sort="group">分组 <span class="sort-ind"></span></th>
+            <th>用量</th><th data-sort="last_success">最近成功 <span class="sort-ind"></span></th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>
         </table>
@@ -835,8 +875,15 @@ socks5://user:pass@host:port"></textarea></label>
           <div class="grid3">
             <label class="fld"><span class="lb">失败阈值</span><input id="pxHealthFail" type="number" min="1"></label>
             <label class="fld"><span class="lb">成功阈值</span><input id="pxHealthOK" type="number" min="1"></label>
+            <label class="fld"><span class="lb">随机出口避开绑定代理</span>
+              <select id="pxRandomBindAvoid">
+                <option value="fallback">优先空闲，无空闲则全池随机（默认）</option>
+                <option value="strict">绝不占用已绑定代理（走总代理/直连兜底）</option>
+              </select>
+              <button class="xs" id="btnPxRandomBindAvoid" style="margin-top:4px">保存此设置</button>
+            </label>
           </div>
-          <div class="hint">单条/全部测试都发起真实 GET，验证 DNS、TCP、代理握手、认证、TLS 与 HTTP；失败达到阈值后节点临时剔除，探测成功自动恢复。</div>
+          <div class="hint">单条/全部测试都发起真实 GET，验证 DNS、TCP、代理握手、认证、TLS 与 HTTP；失败达到阈值后节点临时剔除，探测成功自动恢复。账号池选「随机」且未绑定固定代理时，默认优先挑没有被任何账号固定绑定的健康代理；实时跟随账号池绑定变化，无需重启。</div>
         </div>
       </div>
     </section>
@@ -1465,8 +1512,14 @@ socks5://user:pass@host:port"></textarea></label>
       </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">选择 JSON 文件（可多选）。支持插件 OAuth 单对象、对象数组，以及 cockpit tools 导出的账号数组，格式自动识别。</div>
+        <div class="hint" style="margin-bottom:8px">选择 JSON 文件（可多选）。支持插件 OAuth 单对象、对象数组，以及 cockpit tools 导出的账号数组，格式自动识别；按 UID 去重（批内重复或号池已存在会跳过）。</div>
+        <label class="fld" style="margin-bottom:8px"><span class="lb">导入到分组</span>
+          <input id="importGroup" list="importGroupList" placeholder="留空 = 未分组；可输入新分组名">
+          <datalist id="importGroupList"></datalist>
+          <span class="hint">整批默认分组；JSON 条目里若带 group 字段会覆盖它</span>
+        </label>
         <input type="file" id="importFile" accept=".json" multiple style="margin-bottom:8px">
+        <div id="importProgress" class="state" hidden><span class="dots">导入进度</span></div>
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
       </div>

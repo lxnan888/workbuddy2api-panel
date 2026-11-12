@@ -27,6 +27,7 @@ func (p *Panel) proxyRoutes() {
 	p.mux.HandleFunc("DELETE /panel/api/proxies/{id}", p.withAuth(p.proxyDelete))
 	p.mux.HandleFunc("POST /panel/api/proxies/{id}/check", p.withAuth(p.proxyCheck))
 	p.mux.HandleFunc("PUT /panel/api/proxies/health", p.withAuth(p.proxyHealth))
+	p.mux.HandleFunc("PUT /panel/api/proxies/random_bind_avoid", p.withAuth(p.proxyRandomBindAvoid))
 	p.mux.HandleFunc("PUT /panel/api/accounts/{uid}/proxy", p.withAuth(p.accountProxy))
 	p.mux.HandleFunc("PUT /panel/api/proxies/realm/{realm}", p.withAuth(p.realmProxy))
 }
@@ -156,6 +157,25 @@ func (p *Panel) proxyHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// proxyRandomBindAvoid 保存「随机出口避开账号绑定代理」模式（fallback/strict）。
+// 写入 proxy-pool.json，下一次选号立即生效，无需重启。
+func (p *Panel) proxyRandomBindAvoid(w http.ResponseWriter, r *http.Request) {
+	if !p.proxyReady(w) {
+		return
+	}
+	var body struct {
+		Mode string `json:"mode"`
+	}
+	if !proxyBody(w, r, &body) {
+		return
+	}
+	if err := p.cfg.ProxyPool.SetRandomBindAvoid(body.Mode); err != nil {
+		proxyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": p.cfg.ProxyPool.RandomBindAvoid()})
 }
 
 // proxyGlobal 保存容器级总代理（存 proxy-pool.json，不写 config.json）。

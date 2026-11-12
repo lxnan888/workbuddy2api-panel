@@ -117,16 +117,18 @@
   .acc .acts { grid-column: 1 / -1; display: flex; gap: 5px; }
   .acc .acts button { flex: 1 1 0; min-width: 0; padding: 5px 2px; font-size: 11.5px; white-space: nowrap; border-radius: 8px; }
 
-  /* 账号卡：① 标题/ID + 状态 ② 积分细条+积分+成功失败+在途 ③ 用量标签+最近成功 ④ 按钮 */
-  #accBody tr > .who { grid-column: 1 / 9; }
-  #accBody tr > td:nth-child(3) { grid-column: 9 / 13; flex-direction: column; align-items: flex-end; gap: 1px; }
-  #accBody tr > td:nth-child(3)::before { content: none; }
-  #accBody tr > td:nth-child(3) .hint { font-size: 9.5px; margin-top: 0; text-align: right; }
+  /* 账号卡（13 列）：① 标题/ID + 状态 ② 积分细条+积分+成功失败+优先级/并发/分组 ③ 用量标签+最近成功 ④ 按钮 */
+  #accBody tr > .check-cell { grid-column: 1 / 2; }
+  #accBody tr > .who { grid-column: 2 / 9; }
+  #accBody tr > .proxy-cell { grid-column: 9 / 13; flex-direction: column; align-items: flex-end; gap: 1px; }
+  #accBody tr > .proxy-cell::before { content: none; }
+  #accBody tr > .proxy-cell .hint { font-size: 9.5px; margin-top: 0; text-align: right; }
   #accBody tr > .cred { grid-column: 1 / 7; gap: 5px; }
   #accBody tr > .cred .n { font-size: 10.5px; }
-  #accBody tr > td:nth-child(5) { grid-column: 7 / 10; }
-  #accBody tr > td:nth-child(6) { grid-column: 10 / 13; }
-  #accBody tr > td:nth-child(8) { grid-column: 1 / 4; order: 1; }
+  #accBody tr > td:nth-child(6) { grid-column: 7 / 10; }   /* 状态 */
+  #accBody tr > td:nth-child(7) { grid-column: 10 / 13; }  /* 成功/失败 */
+  #accBody tr > .pri, #accBody tr > .conc, #accBody tr > .grp { grid-column: span 3; }
+  #accBody tr > td:nth-child(12) { grid-column: 1 / 4; order: 1; } /* 最近成功 */
   #accBody tr > .usage-cell { grid-column: 4 / 13; order: 2; }
   #accBody tr > .acts { order: 3; }
 

@@ -133,6 +133,7 @@ func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
+		e.creditsObserved = true // 上游余额查询已回填：归零是确认值，不是「未知」
 		if remain > 0 && !e.disabled {
 			p.reviveCoolingLocked(e, remain, total)
 		} else {
@@ -222,6 +223,7 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 		return
 	}
 	if credit > 0 {
+		e.creditsObserved = true // 真实扣费观测：后续插值余额是已观测值
 		d := int64(credit + 0.5) // 四舍五入
 		if d > e.credits {
 			d = e.credits // 钳 0：扣穿（对账延迟/消费早于记账）不产生负余额
@@ -437,7 +439,12 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 	// 后下次会话重新绑定。
 	// 日志频次：天然每请求至多一条——首次返回 nil 即解绑，后续轮转不再调入本路径
 	// （无需额外节流）；粘性续期中每个新请求一条，恰好是「余额仍在线下」的持续提醒。
-	if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {
+	if p.noCreditBlockedForRealmModel(e, model, e.a.Realm(), now) {
+		log.Printf("WARN: [pool] credit exhausted: sticky acct=%s model=%s credits=0, unbind (paid/unknown model held out)",
+			logfmt.Label(e.a.UID, e.a.Nickname), model)
+		return nil
+	}
+	if p.creditFloorBlockedForRealmModel(e, model, e.a.Realm(), now) {
 		log.Printf("WARN: [pool] credit floor: sticky acct=%s model=%s credits=%d < floor=%d, unbind (paid model held out)",
 			logfmt.Label(e.a.UID, e.a.Nickname), model, e.credits, p.creditFloor)
 		return nil
@@ -738,6 +745,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		ConcurrencyLimit:     p.concurrencyLimit(e),
 		ConcurrencyOverride:  e.concurrency,
 		Priority:             e.priority,
+		Group:                e.group,
 		BreakerFails:         e.fails,
 		BreakerUntil:         e.breakerUntil,
 	}

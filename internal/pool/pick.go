@@ -314,29 +314,72 @@ func (p *Pool) floorBlockedForModel(e *entry, model string, now time.Time) bool 
 	return p.floorBlockedForRealmModel(e, model, "", now)
 }
 
-// floorBlockedForRealmModel 同上，但带 realm 上下文（倍率按 (realm, 模型) 分桶，
-// 同名模型在 CN / global 两域倍率可不同）。realm 为空时按倍率表的空域键查。
-func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time.Time) bool {
+// creditFloorBlockedForRealmModel 原有 credit_floor 保底（不含零积分硬保护）：
+// floor>0 且账号低于 floor 且模型收费时拦截。免费/未知倍率模型放行。
+func (p *Pool) creditFloorBlockedForRealmModel(e *entry, model, realm string, now time.Time) bool {
 	if p.creditFloor <= 0 || model == "" || e.credits >= p.creditFloor {
 		return false
 	}
-	// 1) 本地实测台账：最权威（真实扣费证据）。
+	// 本地实测台账：最权威（真实扣费证据）。
 	if mc, ok := e.modelCostOf(model, now); ok {
 		return mc.CostPer1k > 0
 	}
-	// 2) 上游目录倍率兜底：无实测观测时用牌价判收费，堵住「无观测 = 放行」漏洞。
+	// 上游目录倍率兜底：无实测观测时用牌价判收费。
 	if p.modelRateOf == nil {
 		return false
 	}
 	rate := p.modelRateOf(realm, model)
 	if rate == "" {
-		return false // 目录未覆盖：未知，放行（见上方注释）
+		return false // 目录未覆盖：未知；低余额但非零时按放行（保底的保守口径）
 	}
 	v, err := strconv.ParseFloat(rate, 64)
 	if err != nil {
 		return false // 倍率非数值（异常形态）：不据此惩罚账号
 	}
 	return v > 0
+}
+
+// floorBlockedForRealmModel 选号路径的积分拦截总入口 = 零积分硬保护 + credit_floor 保底。
+// 普通选号 / 粘性 / 兜底 / 跨域 servable 共用，避免各处漏判。
+func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time.Time) bool {
+	return p.noCreditBlockedForRealmModel(e, model, realm, now) ||
+		p.creditFloorBlockedForRealmModel(e, model, realm, now)
+}
+
+// noCreditBlockedForRealmModel 零积分号硬保护：credits<=0 时，除非模型**明确免费**，
+// 否则一律不进候选（普通选号 / 粘性 / 全冷却兜底 / 跨域 servable 共用本判据）。
+//
+// 为什么需要：上游余额门禁是账号级的——号已归零，任何非免费模型都会 402，
+// 继而 CooldownUntilTomorrow4AM 硬冷却到次日 04:00，用户看到的就是「降级/暂停」。
+// 原 floorBlockedForRealmModel 对「目录倍率未知」的模型放行（见其注释的保守选择），
+// 于是别名/新模型/目录未覆盖的模型会先把零积分号打一遍 402 才轮换。
+//
+// 「明确免费」判据（两级，任一成立即放行）：
+//   - 本地实测台账 tier0（cost_per_1k<=0）；
+//   - 上游目录倍率为 0 / "0.00"（且倍率表已注入）。
+//
+// 其余（实测收费 / 目录收费 / 倍率未知 / 倍率表未注入）一律拦。
+// 无模型上下文（model==""）的模型无关端点、以及「余额未观测」的新号（credits=0
+// 只是缺省值，尚未查过上游余额）都不拦，避免新号在首次余额刷新前被锁死。
+func (p *Pool) noCreditBlockedForRealmModel(e *entry, model, realm string, now time.Time) bool {
+	if model == "" || e.credits > 0 || !e.creditsObserved {
+		return false
+	}
+	// 本地实测最优先：tier0 免费放行，tier2 收费拦。
+	if mc, ok := e.modelCostOf(model, now); ok {
+		return mc.CostPer1k > 0
+	}
+	// 无实测：目录倍率明确免费才放行。
+	if p.modelRateOf != nil {
+		rate := p.modelRateOf(realm, model)
+		if rate != "" {
+			if v, err := strconv.ParseFloat(rate, 64); err == nil && v <= 0 {
+				return false
+			}
+			return true
+		}
+	}
+	return true // 零积分 + 倍率未知/未注入：不再放行（修复点）
 }
 
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。

@@ -39,7 +39,10 @@
 > | **账号池筛选与静默刷新** | 顶部状态卡（账号总数 / 可用 / 冷却中 / 已禁用 / 已暂停选号）可点击筛选账号表，默认只显示「可用」；轮询刷新改为内容不变不动 DOM，表格内编辑/下拉操作期间不重建，消除闪烁与输入打断。 |
 > | **账号固定代理常显** | 账号「出口」下拉直接列出全部代理（随机 / 直连 / 固定代理），不再等 focus 才填充；每个账号可单独绑定固定代理。 |
 > | **账号优先级** | 账号表新增「优先级」列，可点击设置 `0–9999`（默认 `0`，数字越大越优先），写入 `state.json` 并实时生效。优先级是选号最高排序键：先收敛到最高优先级组，同组内才走快过期 / 模型成本分层 / 加权随机 / 轮询 / 顺序耗尽；高优先级号冷却、并发满、模型不可用或积分保底时立即降级；裸模型名跨域时两域一起比较，`preferred_realm` 仅在同优先级内决定先后，显式 `cn:` / `global:` 仍锁域；已有粘性绑定不被高优先级抢占，新会话按最高优先级分配。绑定号临时故障（冷却 / 并发满 / 模型限流 / 积分保底等）时保留原绑定，本请求临时用别的号且不改绑，原号在 TTL 内恢复后自动切回（故障顶替期间不续期 TTL，与 sub2api 的 `PreserveStickyBinding` 口径一致）。同时修复裸模型名粘性校验只查 CN 域、绑定到 Global 后下一轮被误判失效的问题（开启跨域回退时粘性校验/新分配合并两域）。 |
-> | **账号 JSON 导入扩展** | 「导入 JSON」自动识别三种形态：插件 OAuth 单对象（`auth` + `account` 嵌套，可直接导入桌面端凭证文件）、这类对象的数组、cockpit tools 数组；支持一次多选文件并汇总结果。导入后动作与 cockpit 一致：CN 签到、global 注册激活 + trial、查余额并自动解禁。 |
+> | **账号 JSON 导入扩展** | 「导入 JSON」自动识别三种形态：插件 OAuth 单对象（`auth` + `account` 嵌套，可直接导入桌面端凭证文件）、这类对象的数组、cockpit tools 数组；支持一次多选文件，改为后端异步任务 + `202`/进度轮询，实时显示 `8/99`（已处理/总数），刷新页面后进度仍显示直到完成，一批未完成前拒绝新导入（409）；按 UID 去重（批内重复或号池已存在直接跳过，不覆盖凭证/不重跑签到）；导入可指定整批默认分组，JSON 条目的 `group` 字段可覆盖。导入后动作与 cockpit 一致：CN 签到、global 注册激活 + trial、查余额并自动解禁。 |
+> | **账号分组与排序** | 账号表新增「分组」列与复选框：行内点击改分组、勾选批量移动/新建分组/移出分组；顶部 chips（全部/未分组/各组名）与状态卡叠加筛选；可重命名分组；「删除分组」= 直接删除该组全部账号（含凭证文件、代理解绑，二次确认）。分组仅用于展示/筛选/导入归类，不参与选号、优先级、粘性。表头点击按账号名/积分/成功数/优先级/分组/最近成功时间排序，再点反向，状态缓存在浏览器 localStorage，刷新恢复。分组存 `state.json`，实时生效、重启保留。 |
+> | **零积分号跳过付费模型** | 已确认归零（`credits=0` 且曾真实观测过余额）的账号不再打付费/倍率未知模型，避免上游 402 → 硬冷却到次日 04:00（用户看到的「降级/暂停」）；仅明确免费的模型（本地实测免费或目录倍率 0）照常放行。普通选号、粘性命中、全冷却兜底、跨域 servable 共用判据；优先级、粘性都越不过。余额未观测的新号（`credits=0` 只是缺省）不拦，签到/查余额回血后自动恢复；`credits_observed` 持久化避免重启误伤。`credit_floor` 原有语义保持不变。 |
+> | **随机出口避开账号绑定代理** | 账号池选「随机」且未绑定固定代理时，优先从「健康且没有被任何账号 `fixed` 绑定」的代理里等概率随机，避免撞到别的号专属出口；`Bind`/`Unbind` 实时生效。代理池「健康检查」新增设置：默认 `fallback`（无空闲代理时回退全池健康代理随机），可选 `strict`（绝不占用已绑定代理，改走总代理/直连兜底）。仅统计账号级绑定，realm 默认 fixed 仍可被随机命中；设置写入 `proxy-pool.json`。 |
 > | **模型级阻塞状态码对齐** | 全池某模型 6004 限流 → 429 `model_rate_limited`（可退避重试）；全池 11102 / 11158 模型不可用 → 404 `model_not_found`（换模型才有用，原 400 `model_unavailable` 会让客户端误判为请求参数错误）；无可用账号 → 503 `no_healthy_account`。 |
 > | **配置全量热生效** | 除 `state_file` 外，提示词、超时、UA、上游 base、`max_payload_bytes`、`restriction_hold_seconds`、`listen`、`read_timeout`、`auth_dir`、`upstash`、`session_sticky.*`、日志归档、模型开关、并发等待等保存后立即生效；`listen`/`read_timeout` 进程内重建监听。 |
 > | **请求管线增强** | 出站模型剥 realm 前缀；目录 `max_output_tokens` 补缺省额度；字符串 `stop` 归一化为数组；`prompt.keep_recent_rounds` 历史裁剪；思考档位输出预算下限；工具描述脱敏；`prompt_cache_key` 改为 UUID v4 形态；补会话轮级字段；chat body gzip 与 RPC gzip/deflate/br 解码。 |
@@ -813,7 +816,7 @@ http://127.0.0.1:7863/panel/
 
 | 视图 | 功能 |
 |---|---|
-| **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、账号名内联编辑（写回 `auths/*.json`）、出口下拉（随机 / 直连 / 固定代理）、积分量条、成功·失败计数、优先级（点击设置 0–9999，数字越大越优先）、并发（点击设置）、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
+| **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 分组 chips（全部 / 未分组 / 各组名，与状态卡叠加筛选）、批量选择与移动分组、重命名/删除分组、表头排序（点击正向、再点反向，缓存浏览器）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、复选框、账号名内联编辑（写回 `auths/*.json`）、出口下拉（随机 / 直连 / 固定代理）、积分量条、成功·失败计数、优先级、并发、分组（点击修改）、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
 | **代理池** | 总代理（容器级出口）配置与测试；代理批量导入、输入框预测试、编辑/启用/删除、单条检测与全部检测；代理表显示协议、脱敏地址、状态、延迟、最近检测、错误、绑定数；realm 默认出口与健康检查 URL/间隔/超时/阈值设置；账号池每行可单独指定出口，一个固定代理可服务多个账号 |
 | **用量** | 指标卡（请求数 / 总 token / prompt / completion / 失败尝试 / 平均延迟，含占比与吐字速率）+ **Token 时序图**（渐变堆叠柱、均值参考线、峰值标注、悬停看单桶明细）+ **用量明细**（按账号 / 按模型 / 按域切换，可按合计 Token / 请求数 / 失败数 / 平均延迟排序，含 prompt·completion 占比条）+ **积分扣除历史**（按账号 / 按模型，折算「积分 / 1M Token」） |
 | **积分构成** | **积分到期分布**（按批次到期日聚合，颜色区分账号）+ **账号对比**（按来源归并的面额 / 余额 / 包数卡片与混合构成条）+ 逐包明细（按到期日排序，默认展开最近到期的 `panel.package_detail_limit` 个，其余与已用完的包折叠） |
@@ -891,11 +894,11 @@ http://127.0.0.1:7863/panel/
 | 分组 | 端点 |
 |---|---|
 | 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET proxies` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
-| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove` · `nickname`；`PUT accounts/{uid}/proxy` · `PUT accounts/{uid}/concurrency` · `PUT accounts/{uid}/priority`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
-| 代理池 | `POST proxies`（导入）· `POST proxies/test`（输入预测试）· `POST proxies/check`（全部检测）· `POST proxies/{id}/check`（单条检测）· `PUT proxies/global` · `POST proxies/global/check` · `PATCH/DELETE proxies/{id}` · `PUT proxies/health` · `PUT proxies/realm/{realm}` |
+| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove` · `nickname`；`PUT accounts/{uid}/proxy` · `concurrency` · `priority` · `group`；`POST accounts/group`（批量移动）· `groups/rename` · `groups/delete`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
+| 代理池 | `POST proxies`（导入）· `POST proxies/test`（输入预测试）· `POST proxies/check`（全部检测）· `POST proxies/{id}/check`（单条检测）· `PUT proxies/global` · `POST proxies/global/check` · `PATCH/DELETE proxies/{id}` · `PUT proxies/health` · `PUT proxies/random_bind_avoid` · `PUT proxies/realm/{realm}` |
 | 补偿 | `GET compensation`（逐号查补偿状态，**只读**）；`POST accounts/{uid}/compensation`（单号领）；`POST compensation_all`（全量领，返回 `summary{claimed,skipped,errored,credit}`——**先看 `errored` 再看 `claimed`**，否则会把「全部查询失败」说成「没有待领补偿」） |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
-| 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit`（账号 JSON 导入，三种形态自动识别） |
+| 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit`（多文件异步导入，202 + 进度）· `GET import/status`（进度 8/99） |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
 
 账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。

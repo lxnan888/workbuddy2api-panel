@@ -27,6 +27,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/proxypool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
+
 // embeddingsAttempts 失败换号上限（与 search/images 同量级）。
 const embeddingsAttempts = 3
 

@@ -131,7 +131,9 @@ type Status struct {
 	// ConcurrencyOverride 面板设置的覆盖值；0 = 按域默认（不输出零值）。
 	ConcurrencyOverride int `json:"concurrency_override,omitempty"`
 	// Priority 面板设置的账号优先级：数字越大越优先，0 = 默认。
-	Priority     int       `json:"priority"`
+	Priority int `json:"priority"`
+	// Group 账号分组标签（仅展示/筛选用，不参与选号）；空 = 未分组。
+	Group        string    `json:"group,omitempty"`
 	BreakerFails int       `json:"breaker_fails"`
 	BreakerUntil time.Time `json:"breaker_until,omitempty"`
 }
@@ -200,6 +202,10 @@ type entry struct {
 	a            *auth.Auth
 	credits      int64
 	creditsTotal int64 // 积分总额度（UserResource 聚合；0 = 未知）
+	// creditsObserved 运行态：是否曾由余额查询/签到/插值写入过余额。
+	// 区分「已确认归零」与「新加入、余额未知（credits 缺省 0）」——零积分硬保护
+	// 只拦前者，避免新号在首次余额刷新前被永久锁死。不持久化：重启后重新观测。
+	creditsObserved bool
 	// creditsExpiring 配置窗口内即将过期的可用积分子集，是 credits 的一部分。
 	// creditsEarliestExpiry / creditsEarliestRemaining 是全部未来到期批次中的最早一批；
 	// 两者均由签到/余额刷新更新，供 earliest-expiry 路由和状态观测使用。
@@ -284,6 +290,9 @@ type entry struct {
 	// priority 账号优先级：数字越大越优先，0 = 默认。选号时先收敛到最高优先级组，
 	// 再在同组内沿用成本分层 / 快过期 / 权重 / 顺序策略。持久化到 state.json。
 	priority int
+	// group 账号分组标签（仅展示/筛选/导入归类，不参与选号）；空 = 未分组。
+	// 持久化到 state.json。
+	group string
 }
 
 // modelCostOf 返回该账号在指定 model 上的有效成本观测；无观测或观测过期返回 ok=false。
@@ -449,10 +458,15 @@ func (e *entry) fallbackKind(now time.Time) string {
 type stateAccount struct {
 	Credits      int64 `json:"credits"`
 	CreditsTotal int64 `json:"credits_total,omitempty"`
+	// CreditsObserved 是否曾真实观测过余额（签到/查询/扣费）。旧状态缺字段 = false，
+	// 于是 credits=0 只当「未知」不拦，避免存量部署升级后零积分号全被锁死。
+	CreditsObserved bool `json:"credits_observed,omitempty"`
 	// Concurrency 单账号并发覆盖值；0 = 按域默认（国内 3 / 国际 2）。
 	Concurrency int `json:"concurrency,omitempty"`
 	// Priority 账号优先级：数字越大越优先；0 = 默认（缺字段旧状态零值）。
-	Priority     int       `json:"priority,omitempty"`
+	Priority int `json:"priority,omitempty"`
+	// Group 账号分组标签；空 = 未分组。
+	Group        string    `json:"group,omitempty"`
 	Disabled     bool      `json:"disabled"`
 	Paused       bool      `json:"paused,omitempty"`
 	Reason       string    `json:"reason,omitempty"`

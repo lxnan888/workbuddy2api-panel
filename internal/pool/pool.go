@@ -3,6 +3,7 @@
 package pool
 
 import (
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -338,6 +339,88 @@ func (p *Pool) AccountPriority(uid string) (int, bool) {
 		return 0, false
 	}
 	return e.priority, true
+}
+
+// SetAccountGroup 设置单账号分组标签（空 = 移出分组/未分组）。
+// 返回 false 表示账号不存在。变更立即生效并标记待落盘。
+func (p *Pool) SetAccountGroup(uid, group string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	e.group = normalizeGroup(group)
+	p.dirty.Store(true)
+	return true
+}
+
+// SetAccountsGroup 批量把给定 UID 移到同一分组；返回实际变更的账号数。
+func (p *Pool) SetAccountsGroup(uids []string, group string) int {
+	g := normalizeGroup(group)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, uid := range uids {
+		e, ok := p.byUID[uid]
+		if !ok {
+			continue
+		}
+		e.group = g
+		n++
+	}
+	if n > 0 {
+		p.dirty.Store(true)
+	}
+	return n
+}
+
+// RenameAccountGroup 把整组账号的分组标签改名（空组名非法）。返回变更数。
+func (p *Pool) RenameAccountGroup(from, to string) (int, bool) {
+	to = normalizeGroup(to)
+	if to == "" {
+		return 0, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, e := range p.byUID {
+		if e.group == from {
+			e.group = to
+			n++
+		}
+	}
+	if n > 0 {
+		p.dirty.Store(true)
+	}
+	return n, true
+}
+
+// AccountGroups 返回当前所有非空分组名（去重升序），供面板 chips 渲染。
+func (p *Pool) AccountGroups() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	set := make(map[string]struct{})
+	for _, e := range p.byUID {
+		if e.group != "" {
+			set[e.group] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for g := range set {
+		out = append(out, g)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// normalizeGroup 归一化分组名：去首尾空白、限长 32，避免脏数据撑爆面板。
+func normalizeGroup(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 32 {
+		return s[:32]
+	}
+	return s
 }
 
 // concurrencyLimit 报告账号的生效并发上限：覆盖值 >0 用它，否则按域默认
