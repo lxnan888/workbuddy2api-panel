@@ -772,7 +772,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
       </div>
 
-      <div class="box">
+      <!-- 默认位置锚点：panel.model_locks_position=bottom 时 mlBox 插到它后面 -->
+      <span id="mlBottomAnchor" hidden></span>
+      <!-- 模型锁池：位置由 panel.model_locks_position 决定，默认在本处（账号池表格下方），
+           可选紧跟「积分到期提醒」卡片。applyModelLocksPosition() 只移动整个 .box 节点。 -->
+      <div class="box" id="mlBox">
         <header>
           <h3>模型锁池 <span class="hint">哪些模型不能用、还要锁多久</span></h3>
           <span class="grow"></span>
@@ -1103,9 +1107,17 @@ socks5://user:pass@host:port"></textarea></label>
                 <button type="button" class="xs" id="btnEye">显示</button></div>
                 <span class="hint">立即生效（含面板自身）</span></label>
             </div>
-            <label class="fld"><span class="lb">单账号明细默认展示条数</span>
-              <input name="package_detail_limit" type="number" min="1" placeholder="5">
-              <span class="hint">积分构成页按最早到期展示，其余未用完包聚合</span></label>
+            <div class="grid2">
+              <label class="fld"><span class="lb">单账号明细默认展示条数</span>
+                <input name="package_detail_limit" type="number" min="1" placeholder="5">
+                <span class="hint">积分构成页按最早到期展示，其余未用完包聚合</span></label>
+              <label class="fld"><span class="lb">模型锁池卡片位置</span>
+                <select name="model_locks_position">
+                  <option value="bottom">账号池表格下方（默认 / 原位置）</option>
+                  <option value="after_expiry">积分到期提醒下方</option>
+                </select>
+                <span class="hint">全局生效，保存后立即移动卡片，无需重启</span></label>
+            </div>
           </div>
         </div>
 

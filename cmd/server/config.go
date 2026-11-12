@@ -29,6 +29,10 @@ type Config struct {
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
 		PackageDetailLimit int `json:"package_detail_limit"`
+		// ModelLocksPosition 「模型锁池」卡片在账号池页的位置：
+		// "bottom"（默认）= 原位置（账号池表格下方）；"after_expiry" = 紧跟积分到期提醒卡片。
+		// 全局生效（所有浏览器一致），面板保存后前端即时移动 DOM，无需重启。
+		ModelLocksPosition string `json:"model_locks_position"`
 	} `json:"panel"`
 
 	Logging struct {
@@ -553,6 +557,10 @@ func (c *Config) normalize() error {
 	}
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
+	}
+	// 模型锁池位置：只认两个枚举，其余（含老配置缺字段的空串）一律回落默认 bottom。
+	if c.Panel.ModelLocksPosition != "after_expiry" {
+		c.Panel.ModelLocksPosition = "bottom"
 	}
 	if c.Logging.RequestRetentionDays <= 0 {
 		c.Logging.RequestRetentionDays = 7

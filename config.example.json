@@ -9,7 +9,8 @@
     "max_payload_bytes": 67108864
   },
   "panel": {
-    "package_detail_limit": 5
+    "package_detail_limit": 5,
+    "model_locks_position": "bottom"
   },
   "logging": {
     "request_archive_enabled": true,

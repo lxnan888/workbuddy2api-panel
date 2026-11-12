@@ -388,6 +388,7 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDef
 setTimeout(() => {
   const hash = (location.hash || '#accounts').slice(1);
   go(hash in TITLES ? hash : 'accounts');
+  initModelLocksPosition(); // 全局配置：首次进页面就按设置摆放模型锁池卡片
 }, 0);
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
@@ -1833,6 +1834,7 @@ const CFG_MAP = {
   international_account_order: ['pool', 'account_order', 'international'],
   listen: ['listen'], api_key: ['api_key'],
   package_detail_limit: ['panel', 'package_detail_limit'],
+  model_locks_position: ['panel', 'model_locks_position'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'], growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],
@@ -1886,10 +1888,33 @@ function put(obj, path, val) {
   o[path[path.length - 1]] = val;
 }
 
+/* 「模型锁池」卡片位置：仅移动整个 #mlBox 节点，不改表格内容/渲染时序。
+   after_expiry = 紧跟积分到期提醒卡片；其余（含默认 bottom）= 账号池表格下方原位置。
+   默认锚点 #mlBottomAnchor 是 HTML 里插在原位置的空标记，保证移动回去位置精确。 */
+function applyModelLocksPosition(pos) {
+  const box = $('mlBox');
+  if (!box) return;
+  if (pos === 'after_expiry') {
+    const exp = $('expBox');
+    if (exp && exp.nextSibling !== box) exp.parentNode.insertBefore(box, exp.nextSibling);
+  } else {
+    const anchor = $('mlBottomAnchor');
+    if (anchor && anchor.nextSibling !== box) anchor.parentNode.insertBefore(box, anchor.nextSibling);
+  }
+}
+// 首次进页面（任何视图）都拉取一次配置以定位卡片；失败保持默认原位置。
+async function initModelLocksPosition() {
+  try {
+    const d = await api('config');
+    applyModelLocksPosition(d && d.config && d.config.panel && d.config.panel.model_locks_position);
+  } catch (e) { /* 保持默认位置 */ }
+}
+
 async function loadConfig() {
   try {
     const d = await api('config');
     cfgLoaded = d.config;
+    applyModelLocksPosition(cfgLoaded && cfgLoaded.panel && cfgLoaded.panel.model_locks_position);
     $('cfgPath').textContent = d.path || '';
     const f = $('cfgForm');
     for (const [name, path] of Object.entries(CFG_MAP)) {
@@ -1949,6 +1974,10 @@ function markDurationFields() {
 }
 $('cfgForm').addEventListener('input', ev => {
   if (DURATION_FIELDS.includes(ev.target.name)) markDurationFields();
+  if (ev.target.name === 'model_locks_position') applyModelLocksPosition(ev.target.value);
+});
+$('cfgForm').addEventListener('change', ev => {
+  if (ev.target.name === 'model_locks_position') applyModelLocksPosition(ev.target.value);
 });
 $('btnEye').onclick = () => {
   const el = $('cfgKey');
