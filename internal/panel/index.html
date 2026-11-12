@@ -1317,6 +1317,9 @@ socks5://user:pass@host:port"></textarea></label>
               <input type="checkbox" name="watermark_strip_enabled"></div>
             <div class="switch"><span class="lb">会话粘性路由</span>
               <input type="checkbox" name="session_sticky_enabled"></div>
+            <div class="switch"><span class="lb">11140 继续轮换（关闭停手保护）</span>
+              <input type="checkbox" name="restriction_continue"></div>
+            <div class="hint" style="margin-top:6px">默认不勾选 = 保护开启：命中 403 / 11140 立即禁用该号并停止本请求轮换，短窗内多个号命中还会全池暂停（防设备/出口级连坐）。勾选后：命中号仍禁用，但本请求继续轮换试下一个号，连坐暂停门整体停用。立即生效，无需重启。</div>
             <div class="hint" style="margin-top:10px">Upstash Redis 镜像、凭证目录与状态文件路径需手工编辑配置文件（判为重启项）。</div>
           </div>
         </div>

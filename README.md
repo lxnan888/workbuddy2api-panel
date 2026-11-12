@@ -44,7 +44,8 @@
 > | **零积分号跳过付费模型** | 已确认归零（`credits=0` 且曾真实观测过余额）的账号不再打付费/倍率未知模型，避免上游 402 → 硬冷却到次日 04:00（用户看到的「降级/暂停」）；仅明确免费的模型（本地实测免费或目录倍率 0）照常放行。普通选号、粘性命中、全冷却兜底、跨域 servable 共用判据；优先级、粘性都越不过。余额未观测的新号（`credits=0` 只是缺省）不拦，签到/查余额回血后自动恢复；`credits_observed` 持久化避免重启误伤。`credit_floor` 原有语义保持不变。 |
 > | **随机出口避开账号绑定代理** | 账号池选「随机」且未绑定固定代理时，优先从「健康且没有被任何账号 `fixed` 绑定」的代理里等概率随机，避免撞到别的号专属出口；`Bind`/`Unbind` 实时生效。代理池「健康检查」新增设置：默认 `fallback`（无空闲代理时回退全池健康代理随机），可选 `strict`（绝不占用已绑定代理，改走总代理/直连兜底）。仅统计账号级绑定，realm 默认 fixed 仍可被随机命中；设置写入 `proxy-pool.json`。 |
 > | **模型级阻塞状态码对齐** | 全池某模型 6004 限流 → 429 `model_rate_limited`（可退避重试）；全池 11102 / 11158 模型不可用 → 404 `model_not_found`（换模型才有用，原 400 `model_unavailable` 会让客户端误判为请求参数错误）；无可用账号 → 503 `no_healthy_account`。 |
-> | **配置全量热生效** | 除 `state_file` 外，提示词、超时、UA、上游 base、`max_payload_bytes`、`restriction_hold_seconds`、`listen`、`read_timeout`、`auth_dir`、`upstash`、`session_sticky.*`、日志归档、模型开关、并发等待等保存后立即生效；`listen`/`read_timeout` 进程内重建监听。 |
+> | **配置全量热生效** | 除 `state_file` 外，提示词、超时、UA、上游 base、`max_payload_bytes`、`restriction_hold_seconds`、`restriction_continue`、`listen`、`read_timeout`、`auth_dir`、`upstash`、`session_sticky.*`、日志归档、模型开关、并发等待等保存后立即生效；`listen`/`read_timeout` 进程内重建监听。 |
+> | **11140 停手保护开关** | 新增 `upstream.restriction_continue`（默认 `false` = 保护开启），面板「配置 → 上游与高级」可勾选，热生效。默认：命中 403/11140 立即禁用该号并停止本次请求轮换，短窗内 ≥2 个号命中还会全池暂停（`restriction_hold_seconds`）防设备/出口级连坐；勾选后「11140 继续」：命中号仍禁用，但本次请求继续轮换试下一个号，连坐暂停门整体停用（不记窗口、不触发、已有暂停也不拦截）。 |
 > | **请求管线增强** | 出站模型剥 realm 前缀；目录 `max_output_tokens` 补缺省额度；字符串 `stop` 归一化为数组；`prompt.keep_recent_rounds` 历史裁剪；思考档位输出预算下限；工具描述脱敏；`prompt_cache_key` 改为 UUID v4 形态；补会话轮级字段；chat body gzip 与 RPC gzip/deflate/br 解码。 |
 > | **新增协议端点** | 新增 `/v1/embeddings`、`/v1/fetch`、`/v1/search`、`/v1/images/*`、`/v1/videos*`、`/mcp`；`/v1/responses` 与 `/v1/messages` 按需求不实现。 |
 > | **taskjobs 持久化** | 账号后台任务写入 `task-jobs.json`，重启恢复 interrupted 作业；任务中心新增作业列表与启动接口，支持 202 + 轮询。 |

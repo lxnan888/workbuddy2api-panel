@@ -293,6 +293,7 @@ func main() {
 		PromptText:            cfg.PromptText,
 		MaxPayloadBytes:       cfg.Server.MaxPayloadBytes,
 		RestrictionHold:       time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
+		RestrictionContinue:   cfg.Upstream.RestrictionContinue,
 		GlobalEnabled:         cfg.Global.Enabled,
 		EmbeddingsEnabled:     cfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled: cfg.Features.WatermarkStripEnabled,
@@ -430,8 +431,9 @@ func main() {
 		// Live 为 nil 的裸用/测试路径。
 		ModelsHidden: cfg.Models.Hidden,
 		// 入站请求体上限与 11140 风控连坐暂停均为启动项（热改需重启）。
-		MaxPayloadBytes: cfg.Server.MaxPayloadBytes,
-		RestrictionHold: time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
+		MaxPayloadBytes:     cfg.Server.MaxPayloadBytes,
+		RestrictionHold:     time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
+		RestrictionContinue: cfg.Upstream.RestrictionContinue,
 		// 并发满等待参数（默认 30s / 100）。
 		ConcurrencyWaitTimeout: cfg.ConcurrencyWaitTimeoutDur,
 		ConcurrencyWaitQueue:   cfg.Pool.ConcurrencyWaitQueue,
@@ -616,6 +618,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		PromptText:            newCfg.PromptText,
 		MaxPayloadBytes:       newCfg.Server.MaxPayloadBytes,
 		RestrictionHold:       time.Duration(newCfg.Upstream.RestrictionHoldSeconds) * time.Second,
+		RestrictionContinue:   newCfg.Upstream.RestrictionContinue,
 		GlobalEnabled:         newCfg.Global.Enabled,
 		EmbeddingsEnabled:     newCfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,

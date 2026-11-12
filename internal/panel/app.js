@@ -1864,6 +1864,7 @@ const CFG_MAP = {
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
   request_archive_context: ['logging', 'request_archive_context'],
+  restriction_continue: ['upstream', 'restriction_continue'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *

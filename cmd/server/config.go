@@ -181,8 +181,15 @@ type Config struct {
 		PassthroughIP bool `json:"passthrough_ip"`
 		// RestrictionHoldSeconds 11140 风控连坐的全池暂停时长（秒），缺省 1800。
 		// 短窗口内不同账号被上游判「异常行为」时暂停派发；0 = 只保留「命中即停手」，
-		// 不暂停全池。改动需重启进程。见 internal/server/restrict.go。
+		// 不暂停全池。见 internal/server/restrict.go。
 		RestrictionHoldSeconds int `json:"restriction_hold_seconds"`
+		// RestrictionContinue 11140 停手保护开关（默认 false = 保护开启）。
+		// false：命中 11140 立即禁用该号并停止本请求轮换，窗口内多号命中还会触发
+		//        全池暂停（防设备/出口级连坐扫荡）。
+		// true ：「11140 继续」——命中的号仍禁用，但本请求继续轮换试下一个号；
+		//        连坐暂停门整体停用（不记窗口、不触发、已有暂停也不拦截）。
+		// 热生效：并入 livecfg 快照，面板保存后立即生效。
+		RestrictionContinue bool `json:"restriction_continue"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -231,15 +238,15 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		Strategy           pool.RegionStrategies   `json:"strategy"`
-		AccountOrder       pool.RegionAccountOrder `json:"account_order,omitempty"`
+		Strategy     pool.RegionStrategies   `json:"strategy"`
+		AccountOrder pool.RegionAccountOrder `json:"account_order,omitempty"`
 		// ConcurrencyWaitTimeout 全部账号并发满时的最长等待时长（默认 "30s"）。
 		ConcurrencyWaitTimeout string `json:"concurrency_wait_timeout"`
 		// ConcurrencyWaitQueue 全部账号并发满时允许排队的请求上限（默认 100）。
 		ConcurrencyWaitQueue int    `json:"concurrency_wait_queue"`
-		BreakerThreshold   int                     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
-		BreakerCooldown    string                  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax string                  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		BreakerThreshold     int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerCooldown      string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax   string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
 		// 连败降权（issue #114）：ErrClient/传输层这类「不罚号」失败连续计数，达阈
 		// 临时出池。与冷却/熔断并存取更长者不叠加。默认 5 次 / 10m。
 		DegradeThreshold   int     `json:"degrade_threshold"`    // 连败次数触发降权，默认 5

@@ -16,10 +16,10 @@ import (
 
 // Snapshot 一次读取的不可变配置视图。
 type Snapshot struct {
-	APIKey               string        // 网关/面板共同鉴权密钥；空 = 不鉴权
-	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
-	SanitizeFingerprints bool          // 出站请求体指纹脱敏
-	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
+	APIKey               string              // 网关/面板共同鉴权密钥；空 = 不鉴权
+	SoftCooldown         time.Duration       // 429 软冷却基数（<=0 时调用方回退内置默认）
+	SanitizeFingerprints bool                // 出站请求体指纹脱敏
+	RecordClientInfo     bool                // 请求日志是否记录调用来源（客户端 IP / UA）
 	HiddenModels         map[string]struct{} // 精确隐藏的模型 id（已归一化为 "cn:x"/"global:x" 全量形式）；nil = 不隐藏
 	// BareModelIDs 模型列表是否只暴露裸模型名（models.bare_ids）。热改安全。
 	BareModelIDs bool
@@ -32,6 +32,9 @@ type Snapshot struct {
 	// MaxPayloadBytes 入站请求体上限；RestrictionHold 11140 连坐暂停时长。
 	MaxPayloadBytes int64
 	RestrictionHold time.Duration
+	// RestrictionContinue 11140 停手保护开关：false（默认）= 命中即停手 + 连坐暂停；
+	// true = 命中号仍禁用但继续轮换，暂停门整体停用。
+	RestrictionContinue bool
 	// GlobalEnabled global realm 路由开关。
 	GlobalEnabled bool
 	// EmbeddingsEnabled 实验特性：/v1/embeddings 总开关。

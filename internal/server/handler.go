@@ -94,8 +94,12 @@ type Config struct {
 	MaxPayloadBytes int64
 
 	// RestrictionHold 11140 风控连坐的全池暂停时长（upstream.restriction_hold_seconds，
-	// 默认 1800s；0 = 只保留「命中即停手」，不暂停全池）。见 restrict.go。启动时读取。
+	// 默认 1800s；0 = 只保留「命中即停手」，不暂停全池）。见 restrict.go。
 	RestrictionHold time.Duration
+
+	// RestrictionContinue 11140 停手保护开关（默认 false = 保护开启）。
+	// true = 命中号仍禁用但继续轮换，连坐暂停门整体停用。Live 优先，热生效。
+	RestrictionContinue bool
 
 	// RecordContext 是否把会话上下文记入请求事件日志。
 	RecordContext bool
@@ -115,6 +119,7 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		PromptText:            h.cfg.PromptText,
 		MaxPayloadBytes:       h.cfg.MaxPayloadBytes,
 		RestrictionHold:       h.cfg.RestrictionHold,
+		RestrictionContinue:   h.cfg.RestrictionContinue,
 		GlobalEnabled:         h.cfg.GlobalEnabled,
 		EmbeddingsEnabled:     h.cfg.EmbeddingsEnabled,
 		WatermarkStripEnabled: h.cfg.WatermarkStripEnabled,
@@ -835,18 +840,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 11140 风控连坐暂停（restrict.go）：同一窗口里已经有多个账号被上游判「异常行为」，
 	// 说明这轮扫荡是冲设备/出口来的。此时再拿账号去试只会扩大损失，直接快速失败。
-	if d := h.restrict.remaining(); d > 0 {
-		secs := int(d.Seconds() + 0.999)
-		if secs < 1 {
-			secs = 1 // Retry-After 至少 1s，避免极短剩余量写出 0
+	// upstream.restriction_continue=true（「11140 继续」）时整道暂停门停用：
+	// 不拦截请求、不记窗口、不触发暂停。默认 false = 保护开启。
+	if !h.loadLive().RestrictionContinue {
+		if d := h.restrict.remaining(); d > 0 {
+			secs := int(d.Seconds() + 0.999)
+			if secs < 1 {
+				secs = 1 // Retry-After 至少 1s，避免极短剩余量写出 0
+			}
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", secs))
+			writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "account_restricted_hold",
+				fmt.Sprintf("upstream restricted several accounts recently (403 / code 11140); dispatch paused for %ds to avoid further bans — do not rotate accounts or retry in a loop", secs),
+				"wait for the restriction hold to expire or appeal to WorkBuddy; rotating accounts during a restriction wave gets more of them banned")
+			st.status = http.StatusServiceUnavailable
+			st.outcome = reqlog.OutcomeHTTPError
+			return
 		}
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", secs))
-		writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "account_restricted_hold",
-			fmt.Sprintf("upstream restricted several accounts recently (403 / code 11140); dispatch paused for %ds to avoid further bans — do not rotate accounts or retry in a loop", secs),
-			"wait for the restriction hold to expire or appeal to WorkBuddy; rotating accounts during a restriction wave gets more of them banned")
-		st.status = http.StatusServiceUnavailable
-		st.outcome = reqlog.OutcomeHTTPError
-		return
 	}
 
 	tried := map[string]bool{}
@@ -1377,13 +1386,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			restricted := h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 			fail(acct.UID)
-			// 11140 风控连坐（restrict.go）：上游判的是设备/出口而不是单个账号，换号等于
-			// 把下一个号也送进去 → 就地停手，并把这次限制喂给全池暂停判定。
-			// 该错误已在 applyErrorPolicy 里按账号限制记账（Disable），与 WAF 出口状态
-			// 机完全分开，不共用冷却/屏蔽路径。
+			// 11140 风控连坐（restrict.go）：默认保护开启时，上游判的是设备/出口而不是
+			// 单个账号，换号等于把下一个号也送进去 → 就地停手，并把这次限制喂给全池
+			// 暂停判定。upstream.restriction_continue=true 时「11140 继续」：命中号仍
+			// 已在 applyErrorPolicy 里禁用，但本请求继续轮换试下一个号，也不记暂停窗口。
 			if restricted {
-				h.restrict.note(acct.UID, h.loadLive().RestrictionHold)
-				break
+				if live := h.loadLive(); !live.RestrictionContinue {
+					h.restrict.note(acct.UID, live.RestrictionHold)
+					break
+				}
+				// 继续模式：不 break，落到下面的 rotateBackoff 继续轮转。
 			}
 			// WAF 403 按实际出口处理：代理出口立即进入短暂屏蔽，下一轮改走其他
 			// 出口；同一出口在短窗内命中多个账号时，再启用该出口的 fail-fast。

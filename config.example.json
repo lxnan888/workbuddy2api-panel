@@ -64,7 +64,8 @@
     "device_token": "",
     "device_token_file": "",
     "passthrough_ip": false,
-    "restriction_hold_seconds": 1800
+    "restriction_hold_seconds": 1800,
+    "restriction_continue": false
   },
   "features": {
     "sanitize_blacklist_fingerprints": true,
